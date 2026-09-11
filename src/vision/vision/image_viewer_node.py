@@ -6,6 +6,15 @@ el video en una ventana de OpenCV, sin depender de rqt.
 Uso:
     ros2 run vision image_viewer_node --ros-args -p topic:=/camera0/image/compressed
 """
+import os
+
+# El backend Qt5 de OpenCV, bajo una sesión Wayland (GNOME), intenta usar el
+# plugin nativo "wayland" y no sincroniza el tamaño real de la ventana con el
+# compositor: la ventana queda visualmente atascada en 10x10 px aunque reciba
+# frames. Forzar el plugin "xcb" (vía XWayland) antes de la primera llamada
+# GUI de cv2 evita el problema.
+os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (
@@ -39,7 +48,7 @@ class ImageViewerNode(Node):
         self.window_name_ = topic
 
         self.bridge_ = CvBridge()
-        cv2.namedWindow(self.window_name_, cv2.WINDOW_NORMAL)
+        cv2.namedWindow(self.window_name_, cv2.WINDOW_AUTOSIZE)
 
         self.subscription_ = self.create_subscription(
             CompressedImage, topic, self.image_callback, camera_qos_profile()

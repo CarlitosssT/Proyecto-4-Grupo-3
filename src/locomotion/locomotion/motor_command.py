@@ -22,13 +22,13 @@ Device.pin_factory = LGPIOFactory(chip=0)
 # =========================
 MOTOR_PINS = {
     # lado izquierdo
-    "front_left": (5, 6),      # puente H 1
-    "mid_left":   (17, 22),    # puente H 2
-    "rear_left":  (12, 16),    # puente H 3
+    "front_left": (6, 5),      # puente H 1
+    "mid_left":   (22, 17),    # puente H 2
+    "rear_left":  (16, 12),    # puente H 3
     # lado derecho
     "front_right": (13, 19),   # puente H 1
     "mid_right":   (18, 23),   # puente H 2
-    "rear_right":  (20, 21),   # puente H 3
+    "rear_right":  (21, 20),   # puente H 3
 }
 
 LEFT_MOTORS = ("front_left", "mid_left", "rear_left")
