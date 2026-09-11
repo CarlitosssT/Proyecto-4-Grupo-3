@@ -80,10 +80,12 @@ class MotorCommand(Node):
 
         # Todos los motores de un mismo lado reciben el mismo comando
         # (tracción tipo skid-steer con 3 motores por lado).
-        for name in LEFT_MOTORS:
-            self.motors_[name].value = left_cmd
-        for name in RIGHT_MOTORS:
-            self.motors_[name].value = right_cmd
+        #for name in LEFT_MOTORS:
+            #self.motors_[name].value = left_cmd
+        #for name in RIGHT_MOTORS:
+            #self.motors_[name].value = right_cmd
+        self.motors_["front_left"].value = left_cmd
+
 
     def destroy_node(self):
         for motor in self.motors_.values():
