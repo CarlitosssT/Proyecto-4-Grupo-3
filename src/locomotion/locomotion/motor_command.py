@@ -22,13 +22,13 @@ Device.pin_factory = LGPIOFactory(chip=0)
 # =========================
 MOTOR_PINS = {
     # lado izquierdo
-    "front_left": (6, 5),      # puente H 1
-    "mid_left":   (22, 17),    # puente H 2
-    "rear_left":  (16, 12),    # puente H 3
+    "front_left": (6, 5),      # puente H 1 (6,5)
+    "mid_left":   (21, 20),    # puente H 2 (21,20)
+    "rear_left":  (23, 18),    # puente H 3 (23,18)
     # lado derecho
-    "front_right": (13, 19),   # puente H 1
-    "mid_right":   (18, 23),   # puente H 2
-    "rear_right":  (21, 20),   # puente H 3
+    "front_right": (13, 19),   # puente H 1 (13,19)
+    "mid_right":   (12, 16),   # puente H 2 (12,16)
+    "rear_right":  (22, 17),   # puente H 3 (22,17)
 }
 
 LEFT_MOTORS = ("front_left", "mid_left", "rear_left")
@@ -80,11 +80,11 @@ class MotorCommand(Node):
 
         # Todos los motores de un mismo lado reciben el mismo comando
         # (tracción tipo skid-steer con 3 motores por lado).
-        #for name in LEFT_MOTORS:
-            #self.motors_[name].value = left_cmd
-        #for name in RIGHT_MOTORS:
-            #self.motors_[name].value = right_cmd
-        self.motors_["front_left"].value = left_cmd
+        for name in LEFT_MOTORS:
+            self.motors_[name].value = left_cmd
+        for name in RIGHT_MOTORS:
+            self.motors_[name].value = right_cmd
+        #self.motors_["rear_right"].value = left_cmd
 
 
     def destroy_node(self):
