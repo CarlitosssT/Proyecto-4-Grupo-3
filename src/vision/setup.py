@@ -25,8 +25,13 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            # Rover
             'camera_node=vision.camera_node:main',
+            'rtt_probe_node=vision.rtt_probe_node:main',
+            # Estación base
             'image_viewer_node=vision.image_viewer_node:main',
+            'latency_probe_node=vision.latency_probe_node:main',
+            'link_echo_node=vision.link_echo_node:main',
         ],
     },
 )

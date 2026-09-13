@@ -3,16 +3,25 @@
 <package format="3">
   <name>vision</name>
   <version>0.0.0</version>
-  <description>Nodos de cámara: captura, compresión JPEG y publicación como sensor_msgs/CompressedImage.</description>
+  <description>Nodos de cámara: captura, compresión JPEG, publicación como sensor_msgs/CompressedImage y medición de latencia del enlace.</description>
   <maintainer email="andrescarlos011@gmail.com">robotica</maintainer>
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
-  <depend>cv_bridge</depend>
+  <depend>std_msgs</depend>
+
+  <!-- cv_bridge se eliminó a propósito.
+       Los nodos ahora usan cv2.imencode / cv2.imdecode directamente, que es
+       exactamente lo que cv_bridge hacía por dentro para CompressedImage.
+       Una dependencia menos que instalar y una fuente menos de conflictos de
+       versión entre la Pi y la laptop. -->
+
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
