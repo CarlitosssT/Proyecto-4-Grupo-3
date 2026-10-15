@@ -58,6 +58,7 @@ class ImageViewerNode(Node):
 
     def image_callback(self, msg: CompressedImage):
         frame = self.bridge_.compressed_imgmsg_to_cv2(msg)
+        frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
         cv2.imshow(self.window_name_, frame)
         # Procesa el loop de eventos de la ventana; sin esto no se refresca.
         cv2.waitKey(1)
