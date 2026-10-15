@@ -11,24 +11,23 @@ Device.pin_factory = LGPIOFactory(chip=0)
 
 # =========================
 # Pines GPIO (BCM) — 3 puentes H (2 motores por puente)
-# Cada puente agrupa sus 4 pines en filas físicas contiguas del header
-# de 40 pines, para que el cableado hacia cada placa quede junto:
-#   Puente H 1 (front): GPIO 5, 6, 13, 19  -> filas físicas 29,31,33,35
-#   Puente H 2 (mid):   GPIO 17, 18, 27, 22 -> filas físicas 11,12,13,15
-#   Puente H 3 (rear):  GPIO 12, 16, 20, 21 -> filas físicas 32,36,38,40
-# Se dejan libres I2C (GPIO2,3), SPI0 (GPIO7,8,9,10,11) y UART (GPIO14,15)
-# para un IMU.
+# Cada motor usa (IN_forward, IN_backward). Por puente: IN1,IN2 = motor
+# izquierdo; IN3,IN4 = motor derecho.
+#   Puente H 1 (front): IN1..IN4 = GPIO 19, 13, 6, 5   -> físicos 35,33,31,29
+#   Puente H 2 (mid):   IN1..IN4 = GPIO 21, 7, 20, 1   -> físicos 40,26,38,28
+#   Puente H 3 (rear):  IN1..IN4 = GPIO 23, 24, 17, 27 -> físicos 16,18,11,13
+# Nota: GPIO 7 es SPI0 CE1 y GPIO 1 es ID_SC (I2C de la EEPROM de HATs).
 # ¡AJUSTAR según el cableado real de cada puente H antes de energizar!
 # =========================
 MOTOR_PINS = {
-    # lado izquierdo
-    "front_left": (6, 5),      # puente H 1 (6,5)
-    "mid_left":   (21, 20),    # puente H 2 (21,20)
-    "rear_left":  (23, 18),    # puente H 3 (23,18)
-    # lado derecho
-    "front_right": (13, 19),   # puente H 1 (13,19)
-    "mid_right":   (12, 16),   # puente H 2 (12,16)
-    "rear_right":  (22, 17),   # puente H 3 (22,17)
+    # lado izquierdo (IN1, IN2)
+    "front_left": (19, 13),    # puente H 1
+    "mid_left":   (21, 7),     # puente H 2
+    "rear_left":  (23, 24),    # puente H 3
+    # lado derecho (IN3, IN4)
+    "front_right": (6, 5),     # puente H 1
+    "mid_right":   (20, 1),    # puente H 2
+    "rear_right":  (17, 27),   # puente H 3
 }
 
 LEFT_MOTORS = ("front_left", "mid_left", "rear_left")

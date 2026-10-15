@@ -33,13 +33,13 @@ Controla 6 motores DC agrupados en 3 puentes H (2 motores por puente), organizad
 
 **Pines GPIO (BCM)** — ver detalle y advertencia de cableado en `motor_command.py`:
 
-| Puente H | Motores | Pines |
-|---|---|---|
-| 1 (front) | front_left, front_right | 5, 6, 13, 19 |
-| 2 (mid) | mid_left, mid_right | 17, 18, 27, 22 |
-| 3 (rear) | rear_left, rear_right | 12, 16, 20, 21 |
+| Puente H | Motores | IN1, IN2 (izq.) | IN3, IN4 (der.) |
+|---|---|---|---|
+| 1 (front) | front_left, front_right | 19, 13 | 6, 5 |
+| 2 (mid) | mid_left, mid_right | 21, 7 | 20, 1 |
+| 3 (rear) | rear_left, rear_right | 23, 24 | 17, 27 |
 
-Se dejan libres I2C, SPI0 y UART para un IMU.
+Ojo: el puente 2 usa GPIO 7 (SPI0 CE1) y GPIO 1 (ID_SC, EEPROM de HATs); I2C principal (GPIO 2,3) y UART quedan libres.
 
 ### Uso
 
