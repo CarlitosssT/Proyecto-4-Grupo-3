@@ -130,6 +130,7 @@ class ImageViewerNode(Node):
         img = cv2.imdecode(np.frombuffer(msg.data, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             return  # JPEG incompleto: se cuenta como pérdida por la secuencia
+        img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
         _, seq = parse_frame_id(msg.header.frame_id)
         self.stats_.add(now, 0.0, len(msg.data), seq)
         self.frame_ = img
