@@ -124,6 +124,19 @@ class RollingStats:
         while self.samples and self.samples[0][0] < cutoff:
             self.samples.popleft()
 
+    def prune(self, now_ns: int):
+        """
+        Descarta muestras más viejas que la ventana usando la hora ACTUAL.
+
+        Sin esto, si el enlace se corta del todo no entra ninguna muestra
+        nueva, la ventana nunca se limpia, y el reporte sigue mostrando los
+        últimos valores como si todo estuviera bien. Un corte total de 20 s
+        quedaba disfrazado de "loss 14%" congelado.
+        """
+        cutoff = now_ns - self.window_ns
+        while self.samples and self.samples[0][0] < cutoff:
+            self.samples.popleft()
+
     def summary(self) -> dict:
         n = len(self.samples)
         if n == 0:

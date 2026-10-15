@@ -35,7 +35,7 @@ las métricas que deciden la antena.
 Uso
 ---
     ros2 run vision latency_probe_node --ros-args \
-        -p topic:=/camera0/image/compressed \
+        -p topic:=/csi0/image/compressed \
         -p csv_path:=/tmp/rx_d030m.csv \
         -p label:=30m_linea_vista
 """
@@ -80,7 +80,7 @@ class LatencyProbeNode(Node):
     def __init__(self):
         super().__init__("latency_probe_node")
 
-        self.declare_parameter("topic", "camera0/image/compressed")
+        self.declare_parameter("topic", "csi0/image/compressed")
         self.declare_parameter("csv_path", "")
         self.declare_parameter("label", "")          # ej. "30m", "50m_pared"
         self.declare_parameter("window_sec", 5.0)
@@ -152,6 +152,7 @@ class LatencyProbeNode(Node):
 
     # ----------------------------------------------------------------------
     def report(self):
+        self.stats_.prune(self.get_clock().now().nanoseconds)
         s = self.stats_.summary()
         prefix = f"[{self.label_}] " if self.label_ else ""
         self.get_logger().info(prefix + RollingStats.format(s))
@@ -159,7 +160,7 @@ class LatencyProbeNode(Node):
     def destroy_node(self):
         s = self.stats_.summary()
         if s.get("n", 0):
-            self.get_logger().info(
+            print(
                 f"TOTAL recibidos={self.stats_.total_rx}  "
                 f"perdidos={self.stats_.total_lost}"
             )
@@ -176,7 +177,10 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy ya cierra el contexto al recibir Ctrl+C; llamarlo otra vez
+        # lanza "rcl_shutdown already called".
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

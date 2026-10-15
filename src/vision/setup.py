@@ -28,10 +28,13 @@ setup(
             # Rover
             'camera_node=vision.camera_node:main',
             'rtt_probe_node=vision.rtt_probe_node:main',
+            'pi_monitor=vision.pi_monitor:main',
             # Estación base
             'image_viewer_node=vision.image_viewer_node:main',
             'latency_probe_node=vision.latency_probe_node:main',
             'link_echo_node=vision.link_echo_node:main',
+            # Encontrar la Pi en la red sin saber su IP
+            'find_rover=vision.rover_beacon:main',
         ],
     },
 )

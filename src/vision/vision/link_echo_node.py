@@ -29,7 +29,7 @@ punto donde el enlace se degrada, no tres decimales.
 Uso
 ---
     ros2 run vision link_echo_node --ros-args \
-        -p topic:=/camera0/image/compressed
+        -p topic:=/csi0/image/compressed
 """
 import rclpy
 from rclpy.node import Node
@@ -57,7 +57,7 @@ class LinkEchoNode(Node):
     def __init__(self):
         super().__init__("link_echo_node")
 
-        self.declare_parameter("topic", "camera0/image/compressed")
+        self.declare_parameter("topic", "csi0/image/compressed")
         self.declare_parameter("echo_topic", "")
 
         topic = self.get_parameter("topic").value
@@ -94,7 +94,10 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy ya cierra el contexto al recibir Ctrl+C; llamarlo otra vez
+        # lanza "rcl_shutdown already called".
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

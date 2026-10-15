@@ -1,58 +1,55 @@
 #!/usr/bin/env python3
 """
-Abstracción de fuente de cámara.
+Fuentes de cámara.
 
 Va en:  src/vision/vision/camera_source.py
 
-Motivo
-------
-`cv2.VideoCapture` NO sirve para una Camera Module 3. Desde Bullseye el stack
-legacy de cámara de Raspberry Pi está eliminado: el nodo `/dev/video0` de una
-CSI expone el Bayer crudo sin procesar por el ISP. Si abres eso con OpenCV
-obtienes basura verde, no una imagen. Todo el procesado (debayer, balance de
-blancos, control de exposición, corrección de viñeteo y, en la Module 3, el
-autofoco por detección de fase) vive en libcamera.
+Dos implementaciones detrás de la misma interfaz:
 
-Así que hay dos caminos de captura irreconciliables. La solución no es un `if`
-dentro del nodo, sino una interfaz común con dos implementaciones. El nodo
-publica frames y no sabe de dónde salen.
+    "csi:0"  ->  RpicamSource   Camera Module 3 / 3 Wide (la definitiva)
+    "usb:0"  ->  V4L2Source     webcam USB (respaldo)
 
-Interfaz
---------
-Toda fuente devuelve un `Frame` con:
-    stamp_ns  nanosegundos en el dominio de CLOCK_REALTIME (= reloj de ROS)
-    jpeg      bytes JPEG listos para publicar, o None
-    bgr       numpy array BGR, o None
+Por qué la CSI se lee a través de rpicam-vid y no de Python
+-----------------------------------------------------------
+La cámara CSI no se puede abrir con cv2.VideoCapture: su /dev/video entrega
+datos Bayer crudos sin pasar por el ISP, y lo que sale es una imagen verde.
+Todo el procesado (debayer, balance de blancos, exposición, autofoco) vive en
+libcamera.
 
-Que `jpeg` pueda venir ya codificado es la decisión de diseño importante.
-Permite rutas donde el frame NUNCA se descomprime:
+La vía "oficial" desde Python es picamera2, pero en Ubuntu 24.04 no está en
+los repositorios y depende de los bindings de Python de libcamera compilados
+con exactamente la misma versión. Es la pieza que más falla en esta
+distribución.
 
-  · USB en modo passthrough: la webcam ya entrega MJPEG, lo publicamos tal cual
-  · CSI en modo hardware: el encoder JPEG del SoC produce los bytes directamente
+rpicam-vid, en cambio, es un programa de línea de comandos que se compila
+junto con libcamera y funciona en cuanto rpicam-hello funciona. Se le pide
+que codifique MJPEG y escriba a su salida estándar; este módulo lee esa
+salida, separa los cuadros JPEG y se los entrega al nodo.
 
-En ambos casos la CPU de la Pi no toca un solo píxel. Si además necesitas el
-array para procesar (ArUco, detección de obstáculos), pides `want_bgr=True` y
-la fuente te da las dos cosas.
+Ventaja adicional: rpicam-vid usa el codificador JPEG por hardware de la
+Pi 4, así que la CPU no comprime nada.
 
-Especificación de fuente
-------------------------
-    "usb:0"   ->  V4L2Source(device=0)
-    "csi:0"   ->  LibcameraSource(camera_num=0)
-    "0"       ->  se asume usb (compatibilidad con el código viejo)
+Interfaz común
+--------------
+    open()          arranca la cámara
+    read()          devuelve el cuadro MÁS RECIENTE (Frame) o None
+    close()         la detiene
+    describe()      texto para el log
 """
+import os
+import shutil
+import subprocess
+import threading
+import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional
-import time
-
-import numpy as np
 
 
-# --------------------------------------------------------------------------
 @dataclass
 class Frame:
-    stamp_ns: int
-    jpeg: Optional[bytes] = None
-    bgr: Optional[np.ndarray] = None
+    stamp_ns: int          # CLOCK_REALTIME, el mismo reloj que usa ROS
+    jpeg: bytes            # listo para publicar
     width: int = 0
     height: int = 0
 
@@ -61,34 +58,11 @@ def realtime_ns() -> int:
     return time.clock_gettime_ns(time.CLOCK_REALTIME)
 
 
-def boottime_to_realtime_offset_ns() -> int:
-    """
-    libcamera sella los frames con CLOCK_BOOTTIME. El reloj de ROS usa
-    CLOCK_REALTIME. Sumar este offset convierte uno en otro.
-
-    Sin esta conversión el `header.stamp` de la CSI queda desfasado por el
-    uptime de la máquina — típicamente horas o días. Es un error silencioso:
-    todo publica bien y tu sonda de latencia reporta números absurdos.
-
-    Se calcula una vez al arrancar. Los dos relojes avanzan al mismo ritmo, el
-    offset solo salta si alguien ajusta la hora del sistema (por ejemplo NTP
-    corrigiendo al arrancar). Por eso: sincroniza el reloj ANTES de lanzar los
-    nodos, no durante.
-    """
-    return time.clock_gettime_ns(time.CLOCK_REALTIME) - time.clock_gettime_ns(
-        time.CLOCK_BOOTTIME
-    )
-
-
-# --------------------------------------------------------------------------
 class CameraSource:
-    """Interfaz común. No instanciar directamente."""
-
     def open(self) -> None:
         raise NotImplementedError
 
-    def read(self, want_bgr: bool = False) -> Optional[Frame]:
-        """Devuelve el frame más reciente, o None si falló la captura."""
+    def read(self) -> Optional[Frame]:
         raise NotImplementedError
 
     def close(self) -> None:
@@ -98,99 +72,330 @@ class CameraSource:
         return self.__class__.__name__
 
 
-# --------------------------------------------------------------------------
+# ==========================================================================
+# Separador de cuadros MJPEG
+# ==========================================================================
+class MjpegSplitter:
+    """
+    Recibe bytes en trozos arbitrarios y devuelve cuadros JPEG completos.
+
+    Un flujo MJPEG es simplemente un JPEG detrás de otro. Cada uno empieza
+    con el marcador SOI (FF D8) y termina con EOI (FF D9).
+
+    No basta con buscar FF D9: esa secuencia puede aparecer por casualidad
+    dentro de las tablas de cuantización de la cabecera. Por eso se recorren
+    los segmentos de cabecera usando su longitud declarada hasta llegar a SOS
+    (FF DA). A partir de ahí empiezan los datos comprimidos, donde el
+    estándar JPEG garantiza que un FF real siempre va seguido de 00 o de un
+    marcador de reinicio. Solo en esa zona FF D9 significa "fin de cuadro".
+    """
+
+    SOI = b"\xff\xd8"
+    EOI = b"\xff\xd9"
+
+    def __init__(self, max_buffer=8 * 1024 * 1024):
+        self.buf = bytearray()
+        self.max_buffer = max_buffer
+
+    def feed(self, chunk: bytes):
+        self.buf += chunk
+        frames = []
+        while True:
+            frame = self._extract_one()
+            if frame is None:
+                break
+            frames.append(frame)
+        # Protección: si llega basura y nunca aparece un cuadro, no crecer
+        # sin límite.
+        if len(self.buf) > self.max_buffer:
+            self.buf.clear()
+        return frames
+
+    def _extract_one(self):
+        buf = self.buf
+        start = buf.find(self.SOI)
+        if start < 0:
+            # Conservar el último byte por si el FF D8 llegó partido.
+            if len(buf) > 1:
+                del buf[:-1]
+            return None
+        if start > 0:
+            del buf[:start]
+
+        # Recorrer segmentos de cabecera: FF xx LL LL <datos>
+        pos = 2
+        while True:
+            if pos + 4 > len(buf):
+                return None                      # cabecera incompleta
+            if buf[pos] != 0xFF:
+                # Flujo corrupto: descartar este SOI y buscar el siguiente.
+                del buf[:2]
+                return self._extract_one()
+            marker = buf[pos + 1]
+            if marker == 0xFF:                   # relleno permitido
+                pos += 1
+                continue
+            seg_len = (buf[pos + 2] << 8) | buf[pos + 3]
+            if marker == 0xDA:                   # SOS: empiezan los datos
+                data_start = pos + 2 + seg_len
+                break
+            pos += 2 + seg_len
+
+        end = buf.find(self.EOI, data_start)
+        if end < 0:
+            return None                          # cuadro aún incompleto
+        frame = bytes(buf[: end + 2])
+        del buf[: end + 2]
+        return frame
+
+
+# ==========================================================================
+# CSI: Camera Module 3 vía rpicam-vid
+# ==========================================================================
+class RpicamSource(CameraSource):
+    """
+    Parámetros propios de la Camera Module 3 / 3 Wide:
+
+    sensor_mode
+        El sensor IMX708 tiene varios modos de lectura y NO todos ven el
+        campo completo. Algunos recortan el centro para ganar velocidad, lo
+        que en la versión Wide tira a la basura el ángulo que se pagó.
+        "2304:1296" es el modo con binning 2x2 que conserva el campo completo
+        y llega a unos 56 fps. Se verifica con `rpicam-hello --list-cameras`
+        (columna "crop"). Vacío = que rpicam elija.
+
+    width / height
+        El sensor es 16:9. Pedir 640x480 (4:3) hace que libcamera RECORTE
+        los lados para cambiar la proporción, y se pierde campo horizontal.
+        Por eso el valor por defecto es 640x360.
+
+    af_mode / lens_position
+        Autofoco. En un rover en movimiento el autofoco continuo "caza" el
+        foco en cada bache y se pierde imagen útil. Por defecto: manual, con
+        la lente fija. lens_position está en dioptrías (1 / metros):
+            0.0 = infinito    0.5 = 2 m    1.0 = 1 m    2.0 = 50 cm
+        Vacío af_mode = no tocar el enfoque (cámaras sin autofoco).
+
+    shutter_us
+        0 = exposición automática. Con --framerate fijo, rpicam no puede
+        alargar la exposición más allá de la duración de un cuadro, así que
+        los fps no caen en poca luz (el problema que tenía la Brio).
+        Si hay desenfoque por movimiento, fijarlo en 4000-8000.
+
+    tuning_file
+        Calibración de color y sombreado de lente. rpicam la elige sola según
+        el modelo que detecta. Si `rpicam-hello --list-cameras` dice
+        "imx708" en vez de "imx708_wide", está usando la de la lente normal y
+        la imagen sale con las esquinas oscuras; en ese caso pasar la ruta
+        del archivo imx708_wide.json. Vacío = automático.
+    """
+
+    def __init__(self, camera_num=0, width=640, height=360, fps=30,
+                 jpeg_quality=70, sensor_mode="2304:1296", af_mode="manual",
+                 lens_position=0.0, shutter_us=0, hflip=False, vflip=False,
+                 tuning_file="", **_ignored):
+        self.camera_num = int(camera_num)
+        self.width = int(width)
+        self.height = int(height)
+        self.fps = int(fps)
+        self.jpeg_quality = int(jpeg_quality)
+        self.sensor_mode = str(sensor_mode or "")
+        self.af_mode = str(af_mode or "")
+        self.lens_position = float(lens_position)
+        self.shutter_us = int(shutter_us)
+        self.hflip = bool(hflip)
+        self.vflip = bool(vflip)
+        self.tuning_file = str(tuning_file or "")
+
+        self.proc = None
+        self._splitter = MjpegSplitter()
+        self._cond = threading.Condition()
+        self._latest = None          # (stamp_ns, jpeg)
+        self._count = 0
+        self._last_read = 0
+        self._stderr_tail = deque(maxlen=25)
+        self._running = False
+
+    # ----------------------------------------------------------------------
+    def _executable(self):
+        exe = shutil.which("rpicam-vid") or shutil.which("libcamera-vid")
+        if not exe:
+            raise RuntimeError(
+                "no se encontró rpicam-vid. Hay que compilar libcamera y "
+                "rpicam-apps (ver instalar_camara_csi.sh)."
+            )
+        return exe
+
+    def command(self):
+        cmd = [
+            self._executable(),
+            "--camera", str(self.camera_num),
+            "-t", "0",                    # sin límite de tiempo
+            "--nopreview",
+            "--codec", "mjpeg",
+            "--width", str(self.width),
+            "--height", str(self.height),
+            "--framerate", str(self.fps),
+            "--quality", str(self.jpeg_quality),
+            "--flush",                    # no retener cuadros en el búfer
+            "-o", "-",                    # a la salida estándar
+        ]
+        if self.sensor_mode:
+            cmd += ["--mode", self.sensor_mode]
+        if self.af_mode:
+            cmd += ["--autofocus-mode", self.af_mode]
+            if self.af_mode == "manual":
+                cmd += ["--lens-position", f"{self.lens_position:g}"]
+        if self.shutter_us > 0:
+            cmd += ["--shutter", str(self.shutter_us)]
+        if self.hflip:
+            cmd += ["--hflip"]
+        if self.vflip:
+            cmd += ["--vflip"]
+        if self.tuning_file:
+            cmd += ["--tuning-file", self.tuning_file]
+        return cmd
+
+    def open(self):
+        self._running = True
+        self.proc = subprocess.Popen(
+            self.command(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+            # Grupo de procesos propio: el Ctrl+C de la terminal no le llega
+            # directo a rpicam-vid. Lo detiene el nodo al cerrar, en orden.
+            start_new_session=True,
+        )
+        threading.Thread(target=self._read_stdout, daemon=True).start()
+        threading.Thread(target=self._read_stderr, daemon=True).start()
+
+        # Esperar el primer cuadro: si la cámara no arranca, fallar aquí con
+        # un mensaje claro y no después con un silencio.
+        with self._cond:
+            ok = self._cond.wait_for(
+                lambda: self._count > 0 or self.proc.poll() is not None,
+                timeout=10.0,
+            )
+        if self._count == 0:
+            self.close()
+            raise RuntimeError(
+                "rpicam-vid no entregó ningún cuadro"
+                + ("" if ok else " en 10 s")
+                + ". Últimas líneas:\n  " + "\n  ".join(self._stderr_tail)
+            )
+
+    def _read_stdout(self):
+        fd = self.proc.stdout.fileno()
+        while self._running:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            for jpeg in self._splitter.feed(chunk):
+                stamp = realtime_ns()
+                with self._cond:
+                    # Solo se guarda el más reciente. Si el consumidor se
+                    # atrasa, los cuadros viejos se descartan en vez de
+                    # acumularse: la misma lógica que KEEP_LAST(1).
+                    self._latest = (stamp, jpeg)
+                    self._count += 1
+                    self._cond.notify_all()
+        with self._cond:
+            self._cond.notify_all()
+
+    def _read_stderr(self):
+        for raw in iter(self.proc.stderr.readline, b""):
+            line = raw.decode(errors="replace").rstrip()
+            if line:
+                self._stderr_tail.append(line)
+
+    def read(self):
+        with self._cond:
+            got = self._cond.wait_for(
+                lambda: self._count > self._last_read or self.proc.poll() is not None,
+                timeout=2.0,
+            )
+            if self.proc.poll() is not None:
+                raise RuntimeError(
+                    "rpicam-vid terminó (código %s). Últimas líneas:\n  %s"
+                    % (self.proc.returncode, "\n  ".join(self._stderr_tail))
+                )
+            if not got or self._latest is None:
+                return None
+            self._last_read = self._count
+            stamp, jpeg = self._latest
+        return Frame(stamp, jpeg, self.width, self.height)
+
+    def close(self):
+        self._running = False
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        self.proc = None
+
+    def describe(self):
+        af = f"af={self.af_mode or 'sin tocar'}"
+        if self.af_mode == "manual":
+            af += f" lente={self.lens_position:g}"
+        return (f"CSI cam{self.camera_num}  {self.width}x{self.height}@{self.fps}  "
+                f"q={self.jpeg_quality}  modo={self.sensor_mode or 'auto'}  {af}  "
+                f"shutter={'auto' if self.shutter_us <= 0 else self.shutter_us}")
+
+
+# ==========================================================================
+# USB: webcam vía OpenCV (respaldo)
+# ==========================================================================
 class V4L2Source(CameraSource):
     """
-    Webcam USB vía OpenCV.
+    Webcam USB. Dos valores medidos en este proyecto:
 
-    Modos de codificación
-    ---------------------
-    "cpu"          read() -> BGR, luego cv2.imencode. Universal, cuesta CPU.
-                   Si la cámara entrega MJPEG, OpenCV lo DECODIFICA y nosotros
-                   lo volvemos a comprimir: se paga dos veces por nada.
-
-    "passthrough"  Con CAP_PROP_CONVERT_RGB=0 y FOURCC=MJPG, OpenCV devuelve el
-                   buffer MJPEG crudo del driver sin decodificar. Cero CPU.
-                   Contras: la calidad la fija la webcam, `jpeg_quality` deja de
-                   tener efecto, y no todos los drivers lo respetan. Por eso hay
-                   verificación al abrir y caída automática a "cpu".
+      CAP_PROP_BUFFERSIZE = 2   Con 1, el driver descarta uno de cada dos
+                                cuadros y se obtienen exactamente la mitad
+                                de los fps (15 en vez de 30).
+      sin grab() de descarte    Con el bucle de captura en su propio hilo la
+                                cola no crece, y el grab() solo tiraba
+                                cuadros buenos.
     """
 
     def __init__(self, device=0, width=640, height=480, fps=30,
-                 jpeg_quality=80, encode_mode="cpu", flush_buffer=False):
-        self.device = device
-        self.width = width
-        self.height = height
-        self.fps = fps
-        self.jpeg_quality = jpeg_quality
-        self.encode_mode = encode_mode
-        self.flush_buffer = flush_buffer
+                 jpeg_quality=70, **_ignored):
+        self.device = int(device)
+        self.width = int(width)
+        self.height = int(height)
+        self.fps = int(fps)
+        self.jpeg_quality = int(jpeg_quality)
         self.cap = None
-        self._note = ""
 
     def open(self):
         import cv2
-
         self.cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
         if not self.cap.isOpened():
             raise RuntimeError(f"no se pudo abrir /dev/video{self.device}")
-
-        # FOURCC antes que resolución: algunos drivers resetean el tamaño al
-        # cambiar de formato.
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self.cap.set(cv2.CAP_PROP_FPS, self.fps)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-        if self.encode_mode == "passthrough":
-            self.cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
-            ok, probe = self.cap.read()
-            # Un buffer MJPEG crudo llega como array 1xN de uint8 que empieza
-            # con el marcador SOI de JPEG (0xFF 0xD8). Si en su lugar llega un
-            # array HxWx3, el driver ignoró la petición.
-            looks_raw = (
-                ok and probe is not None and probe.ndim <= 2
-                and probe.size > 2 and probe.flat[0] == 0xFF and probe.flat[1] == 0xD8
-            )
-            if not looks_raw:
-                self._note = "passthrough no soportado por el driver, usando cpu"
-                self.encode_mode = "cpu"
-                self.cap.set(cv2.CAP_PROP_CONVERT_RGB, 1)
-
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or self.width
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or self.height
 
-    def read(self, want_bgr=False):
+    def read(self):
         import cv2
-
-        # Descartar el frame encolado sin decodificarlo. Barato, y evita que la
-        # cola del driver crezca si el consumidor se atrasa.
-        if self.flush_buffer:
-            self.cap.grab()
-
-        ok, data = self.cap.read()
+        ok, img = self.cap.read()
         stamp = realtime_ns()
-        if not ok or data is None:
+        if not ok or img is None:
             return None
-
-        if self.encode_mode == "passthrough" and data.ndim <= 2:
-            jpeg = data.tobytes()
-            bgr = None
-            if want_bgr:
-                bgr = cv2.imdecode(data, cv2.IMREAD_COLOR)
-            return Frame(stamp, jpeg, bgr, self.width, self.height)
-
-        bgr = data
-        if (bgr.shape[1], bgr.shape[0]) != (self.width, self.height):
-            bgr = cv2.resize(bgr, (self.width, self.height))
-        ok_enc, buf = cv2.imencode(
-            ".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
-        )
-        if not ok_enc:
+        ok, buf = cv2.imencode(".jpg", img,
+                               [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality])
+        if not ok:
             return None
-        return Frame(stamp, buf.tobytes(), bgr if want_bgr else None,
-                     self.width, self.height)
+        return Frame(stamp, buf.tobytes(), self.width, self.height)
 
     def close(self):
         if self.cap is not None:
@@ -198,242 +403,17 @@ class V4L2Source(CameraSource):
             self.cap = None
 
     def describe(self):
-        s = (f"V4L2 /dev/video{self.device}  {self.width}x{self.height}@{self.fps} "
-             f"modo={self.encode_mode} q={self.jpeg_quality}")
-        return s + (f"  [{self._note}]" if self._note else "")
+        return (f"USB /dev/video{self.device}  {self.width}x{self.height}@{self.fps}  "
+                f"q={self.jpeg_quality}")
 
 
-# --------------------------------------------------------------------------
-class LibcameraSource(CameraSource):
-    """
-    Cámara CSI (Camera Module 3 / Module 3 Wide, sensor IMX708) vía Picamera2.
-
-    Ajustes específicos de la Module 3 que NO existen en una webcam y que
-    importan mucho en un rover:
-
-    af_mode / lens_position
-        La Module 3 tiene autofoco PDAF. En un rover en movimiento el autofoco
-        continuo es activamente dañino: la cámara "caza" el foco cada vez que
-        cambia la escena y pierdes medio segundo de imagen útil en cada
-        búsqueda. Default aquí: MANUAL con el foco fijado.
-        LensPosition se expresa en dioptrías (1/distancia_en_metros):
-            0.0  = infinito
-            0.5  = 2 m
-            1.0  = 1 m
-            3.0  = 33 cm
-        Para un rover de exterior, 0.0 o 0.2 suele ser lo correcto.
-
-    exposure_max_us
-        Con poca luz el control automático alarga la exposición y aparece
-        motion blur, que arruina cualquier detección posterior. Este límite
-        obliga al ISP a subir ganancia en vez de tiempo. 4000 us (1/250 s) es
-        un punto de partida razonable en movimiento.
-
-    Modos de codificación
-    ---------------------
-    "cpu"       capture_array -> cv2.imencode. Funciona en cualquier Pi.
-    "hardware"  MJPEGEncoder de Picamera2. En Pi 4 usa el encoder JPEG del SoC
-                y la CPU queda casi libre. En Pi 5 no hay bloque de encode por
-                hardware, así que Picamera2 cae a software; sigue siendo más
-                eficiente que el camino cpu porque evita la conversión a BGR.
-    """
-
-    def __init__(self, camera_num=0, width=640, height=480, fps=30,
-                 jpeg_quality=80, encode_mode="cpu",
-                 af_mode="manual", lens_position=0.0, exposure_max_us=4000,
-                 hflip=False, vflip=False):
-        self.camera_num = camera_num
-        self.width = width
-        self.height = height
-        self.fps = fps
-        self.jpeg_quality = jpeg_quality
-        self.encode_mode = encode_mode
-        self.af_mode = af_mode
-        self.lens_position = lens_position
-        self.exposure_max_us = exposure_max_us
-        self.hflip = hflip
-        self.vflip = vflip
-
-        self.picam = None
-        self._offset_ns = 0
-        self._queue = None
-        self._model = "?"
-
-    def open(self):
-        from picamera2 import Picamera2
-
-        self._offset_ns = boottime_to_realtime_offset_ns()
-        self.picam = Picamera2(self.camera_num)
-        self._model = self.picam.camera_properties.get("Model", "?")
-
-        frame_us = int(1_000_000 / self.fps)
-        controls = {"FrameDurationLimits": (frame_us, frame_us)}
-
-        # Techo de tiempo de exposición: menos motion blur en movimiento.
-        if self.exposure_max_us:
-            controls["ExposureTime"] = min(self.exposure_max_us, frame_us)
-
-        # El autofoco solo existe si el sensor lo tiene. Un IMX219 (Camera
-        # Module 2) o una HQ Camera no lo tienen y pedirlo lanza excepción.
-        if "AfMode" in self.picam.camera_controls:
-            try:
-                from libcamera import controls as lc
-                if self.af_mode == "manual":
-                    controls["AfMode"] = lc.AfModeEnum.Manual
-                    controls["LensPosition"] = float(self.lens_position)
-                elif self.af_mode == "continuous":
-                    controls["AfMode"] = lc.AfModeEnum.Continuous
-                else:
-                    controls["AfMode"] = lc.AfModeEnum.Auto
-            except ImportError:
-                pass
-
-        if self.encode_mode == "hardware":
-            # El encoder JPEG quiere YUV420. Pedirle RGB lo obliga a convertir
-            # y se pierde la ventaja.
-            cfg = self.picam.create_video_configuration(
-                main={"size": (self.width, self.height), "format": "YUV420"},
-                controls=controls,
-                transform=self._transform(),
-            )
-        else:
-            # RGB888 en Picamera2 entrega los bytes en orden BGR, que es
-            # justo lo que OpenCV espera. El nombre es engañoso y es una
-            # fuente clásica de imágenes con los colores invertidos.
-            cfg = self.picam.create_video_configuration(
-                main={"size": (self.width, self.height), "format": "RGB888"},
-                controls=controls,
-                transform=self._transform(),
-            )
-
-        self.picam.configure(cfg)
-
-        if self.encode_mode == "hardware":
-            self._start_hardware_encoder()
-        else:
-            self.picam.start()
-
-    def _transform(self):
-        try:
-            from libcamera import Transform
-            return Transform(hflip=int(self.hflip), vflip=int(self.vflip))
-        except ImportError:
-            return None
-
-    def _start_hardware_encoder(self):
-        import queue
-        from picamera2.encoders import MJPEGEncoder
-        from picamera2.outputs import Output
-
-        self._queue = queue.Queue(maxsize=2)
-        offset = self._offset_ns
-        q = self._queue
-
-        class QueueOutput(Output):
-            # La firma de outputframe ha cambiado entre versiones de
-            # Picamera2. El *args/**kwargs evita romper al actualizar.
-            def outputframe(self, frame, keyframe=True, timestamp=None,
-                            *args, **kwargs):
-                stamp = (timestamp * 1000 + offset) if timestamp else realtime_ns()
-                if q.full():
-                    # Descartar el viejo, quedarse con el nuevo. Esta cola
-                    # NUNCA debe crecer: es la misma lógica de KEEP_LAST(1)
-                    # del QoS, aplicada dentro del proceso.
-                    try:
-                        q.get_nowait()
-                    except Exception:
-                        pass
-                try:
-                    q.put_nowait((stamp, bytes(frame)))
-                except Exception:
-                    pass
-
-        self.picam.start_recording(
-            MJPEGEncoder(q=self.jpeg_quality), QueueOutput()
-        )
-
-    def read(self, want_bgr=False):
-        if self.encode_mode == "hardware":
-            try:
-                stamp, jpeg = self._queue.get(timeout=2.0)
-            except Exception:
-                return None
-            bgr = None
-            if want_bgr:
-                import cv2
-                bgr = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
-            return Frame(stamp, jpeg, bgr, self.width, self.height)
-
-        import cv2
-
-        request = self.picam.capture_request()
-        try:
-            bgr = request.make_array("main")
-            md = request.get_metadata()
-        finally:
-            # Si no liberas la request, el pool de buffers se agota y la
-            # captura se cuelga en silencio a los pocos segundos.
-            request.release()
-
-        # SensorTimestamp es el instante REAL de exposición del sensor, no el
-        # momento en que tu código recibió el buffer. Es el mejor sello de
-        # tiempo disponible en todo el sistema, y la webcam no tiene nada
-        # equivalente.
-        ts = md.get("SensorTimestamp")
-        stamp = (ts + self._offset_ns) if ts else realtime_ns()
-
-        ok, buf = cv2.imencode(
-            ".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
-        )
-        if not ok:
-            return None
-        return Frame(stamp, buf.tobytes(), bgr if want_bgr else None,
-                     self.width, self.height)
-
-    def close(self):
-        if self.picam is not None:
-            try:
-                if self.encode_mode == "hardware":
-                    self.picam.stop_recording()
-                else:
-                    self.picam.stop()
-            finally:
-                self.picam.close()
-                self.picam = None
-
-    def describe(self):
-        return (f"libcamera cam{self.camera_num} ({self._model})  "
-                f"{self.width}x{self.height}@{self.fps}  modo={self.encode_mode}  "
-                f"af={self.af_mode} lens={self.lens_position}")
-
-
-# --------------------------------------------------------------------------
+# ==========================================================================
 def create_source(spec: str, **kwargs) -> CameraSource:
-    """
-    'usb:0' / 'csi:0' / '0' -> instancia de CameraSource.
-
-    Los kwargs que no aplican a un tipo se descartan, para poder pasar el
-    mismo diccionario de parámetros a cualquier fuente.
-    """
-    spec = str(spec).strip()
-    if ":" in spec:
-        kind, _, index = spec.partition(":")
-    else:
-        kind, index = "usb", spec
-    kind = kind.lower()
-    index = int(index)
-
-    common = ("width", "height", "fps", "jpeg_quality", "encode_mode")
-
+    """'csi:0' -> RpicamSource,  'usb:0' o '0' -> V4L2Source."""
+    spec = str(spec).strip().lower()
+    kind, _, index = spec.partition(":") if ":" in spec else ("usb", "", spec)
+    if kind in ("csi", "libcamera", "rpicam"):
+        return RpicamSource(camera_num=int(index or 0), **kwargs)
     if kind in ("usb", "v4l2"):
-        allowed = common + ("flush_buffer",)
-        kw = {k: v for k, v in kwargs.items() if k in allowed}
-        return V4L2Source(device=index, **kw)
-
-    if kind in ("csi", "libcamera", "picam"):
-        allowed = common + ("af_mode", "lens_position", "exposure_max_us",
-                            "hflip", "vflip")
-        kw = {k: v for k, v in kwargs.items() if k in allowed}
-        return LibcameraSource(camera_num=index, **kw)
-
-    raise ValueError(f"tipo de fuente desconocido: '{kind}' (usa usb: o csi:)")
+        return V4L2Source(device=int(index or 0), **kwargs)
+    raise ValueError(f"fuente desconocida: '{spec}' (usa csi:0 o usb:0)")

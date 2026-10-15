@@ -102,6 +102,7 @@ class RttProbeNode(Node):
 
     # ----------------------------------------------------------------------
     def report(self):
+        self.stats_.prune(self.get_clock().now().nanoseconds)
         s = self.stats_.summary()
         prefix = f"[{self.label_}] " if self.label_ else ""
 
@@ -122,7 +123,7 @@ class RttProbeNode(Node):
         )
 
     def destroy_node(self):
-        self.get_logger().info(
+        print(
             f"TOTAL ecos={self.stats_.total_rx}  huecos={self.stats_.total_lost}"
         )
         self.csv_.close()
@@ -138,7 +139,10 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy ya cierra el contexto al recibir Ctrl+C; llamarlo otra vez
+        # lanza "rcl_shutdown already called".
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
