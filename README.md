@@ -9,6 +9,7 @@ src/
 ├── locomotion/          # Control de los 6 motores DC (teclado o mando DualSense)
 │   ├── locomotion/
 │   │   ├── motor_command.py     # Nodo que mapea /motor_cmd a los 6 motores vía GPIO
+│   │   ├── tool_command.py      # Servo de pala + stepper (GPIO) vía /stepper_steps y /servo_delta
 │   │   ├── keyboard_control.py  # Teleoperación por teclado (w/a/s/d/espacio/q)
 │   │   └── rc_control.py        # Teleoperación con mando DualSense (requiere joy_node)
 │   ├── package.xml
@@ -29,7 +30,8 @@ Controla 6 motores DC agrupados en 3 puentes H (2 motores por puente), organizad
 
 - **`motor_command`**: se suscribe a `/motor_cmd` (`geometry_msgs/Twist`) y traduce `linear.x` (avance) y `angular.z` (giro) a un comando por lado, normalizando ambos lados juntos para preservar la diferencia de velocidad (el giro) cuando algún valor supera el rango. Corre a 50 Hz y usa `gpiozero` con el backend `lgpio`.
 - **`keyboard_control`**: teleoperación por teclado. `w/s` sube/baja velocidad lineal, `a/d` gira, `espacio` detiene, `q` sale. Publica en `/motor_cmd`.
-- **`rc_control`**: teleoperación con mando PS5 DualSense a través de `/joy`. Requiere tener corriendo `joy_node` del paquete `joy` en paralelo. Publica en `/motor_cmd`.
+- **`rc_control`**: teleoperación con mando PS5 DualSense a través de `/joy`. Requiere tener corriendo `joy_node` del paquete `joy` en paralelo. Publica en `/motor_cmd`. Además controla la herramienta de excavación: **X** alterna entre modo *stepper* (inicial) y modo *servo*; **R1** = positivo y **L1** = negativo sobre el modo activo (se repite mientras se mantiene el botón). Publica en `/stepper_steps` y `/servo_delta`. Los índices de botones (`BTN_*`) están al inicio de `rc_control.py`; verificar con `ros2 topic echo /joy`.
+- **`tool_command`**: port a ROS 2 de `prueba_servo_stepper.ino`. Mueve el servo de pala (límites 5°–130°, arranca en 30°) y el stepper NEMA 17 con A4988 (STEP/DIR, rampa de aceleración). Tópicos: `/stepper_steps` (`Int32`, pasos relativos), `/stepper_stop` (`Empty`), `/servo_delta` (`Int32`, grados) y `/servo_angle` (`Int32`, ángulo exacto). Pines BCM por defecto: servo 12, STEP 22, DIR 26 (parámetros `servo_pin`, `step_pin`, `dir_pin`; también `angle_min`, `angle_max`, `initial_angle`, `stepper_max_speed`, `stepper_acceleration`).
 
 **Pines GPIO (BCM)** — ver detalle y advertencia de cableado en `motor_command.py`:
 
@@ -53,6 +55,9 @@ ros2 run locomotion keyboard_control
 # Opción B: mando DualSense
 ros2 run joy joy_node
 ros2 run locomotion rc_control
+
+# Herramienta (servo + stepper), en el Raspberry Pi
+ros2 run locomotion tool_command
 ```
 
 ## Paquete `vision`

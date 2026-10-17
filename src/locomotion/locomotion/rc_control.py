@@ -9,6 +9,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from geometry_msgs.msg import Twist
+from std_msgs.msg import Int32
 
 # PS5 DualSense — ejes (verificar con `ros2 topic echo /joy`, puede variar
 # según el driver/udev rules del sistema)
@@ -16,19 +17,40 @@ AX_STEER = 0   # joystick izquierdo horizontal
 AX_RT = 5      # gatillo derecho (avanzar)
 AX_LT = 2      # gatillo izquierdo (retroceder)
 
+# Botones (mismo layout del driver que los ejes de arriba; verificar igual)
+BTN_CROSS = 0  # X: alterna el modo de la herramienta
+BTN_L1 = 4     # negativo
+BTN_R1 = 5     # positivo
+
+# Modos de la herramienta (R1/L1 actúan sobre el que esté activo)
+MODE_STEPPER = "stepper"
+MODE_SERVO = "servo"
+
+STEPPER_CHUNK = 50          # pasos por comando mientras se mantiene R1/L1
+STEPPER_REPEAT_S = 0.15     # ~ lo que tarda el stepper en dar el chunk a 400 pasos/s
+SERVO_STEP_DEG = 1          # grados por comando mientras se mantiene R1/L1
+SERVO_REPEAT_S = 0.03       # ~33 °/s (la prueba del Arduino iba a ~66 °/s)
+
 
 class RCControlNode(Node):
     def __init__(self):
         super().__init__("rc_control_node")
         self.create_subscription(Joy, "/joy", self.gamepad_callback, 10)
         self.motor_pub_ = self.create_publisher(Twist, "/motor_cmd", 10)
+        self.stepper_pub_ = self.create_publisher(Int32, "/stepper_steps", 10)
+        self.servo_pub_ = self.create_publisher(Int32, "/servo_delta", 10)
 
         self.latest_joy_ = None
+        self.tool_mode_ = MODE_STEPPER
+        self.prev_cross_ = False
+        self.last_tool_cmd_ = 0.0
         self.timer_ = self.create_timer(0.02, self.main_loop)  # 50 Hz
 
         self.get_logger().info(
             "rc_control_node listo\n"
-            "  Motores : LT=retroceder  RT=avanzar  JoyIzq=girar"
+            "  Motores : LT=retroceder  RT=avanzar  JoyIzq=girar\n"
+            "  Herramienta : X=alternar stepper/servo  R1=positivo  L1=negativo\n"
+            f"  Modo inicial: {self.tool_mode_}"
         )
 
     def gamepad_callback(self, msg: Joy):
@@ -50,6 +72,41 @@ class RCControlNode(Node):
         msg.linear.x = speed
         msg.angular.z = angle
         self.motor_pub_.publish(msg)
+
+        self.tool_loop(joy)
+
+    def tool_loop(self, joy: Joy):
+        if len(joy.buttons) <= max(BTN_CROSS, BTN_L1, BTN_R1):
+            return
+
+        # X alterna el modo (solo en el flanco de subida)
+        cross = bool(joy.buttons[BTN_CROSS])
+        if cross and not self.prev_cross_:
+            self.tool_mode_ = (
+                MODE_SERVO if self.tool_mode_ == MODE_STEPPER else MODE_STEPPER
+            )
+            self.get_logger().info(f"Herramienta: modo {self.tool_mode_}")
+        self.prev_cross_ = cross
+
+        direction = int(bool(joy.buttons[BTN_R1])) - int(bool(joy.buttons[BTN_L1]))
+        if direction == 0:
+            self.last_tool_cmd_ = 0.0   # al soltar, la siguiente pulsación sale al instante
+            return
+
+        # Primer comando inmediato; mientras se mantiene, se repite con periodo fijo
+        now = self.get_clock().now().nanoseconds * 1e-9
+        period = STEPPER_REPEAT_S if self.tool_mode_ == MODE_STEPPER else SERVO_REPEAT_S
+        if now - self.last_tool_cmd_ < period:
+            return
+        self.last_tool_cmd_ = now
+
+        out = Int32()
+        if self.tool_mode_ == MODE_STEPPER:
+            out.data = direction * STEPPER_CHUNK
+            self.stepper_pub_.publish(out)
+        else:
+            out.data = direction * SERVO_STEP_DEG
+            self.servo_pub_.publish(out)
 
 
 def main(args=None):
