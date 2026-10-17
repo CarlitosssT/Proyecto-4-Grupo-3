@@ -51,8 +51,14 @@ REMOTE_NODES = {
                "ros2 launch vision rover.launch.py source:={source}"),
     "motores": ("Motores (motor_command)",
                 "ros2 run locomotion motor_command"),
-    "rc": ("Control RC (rc_control)",
-           "ros2 run locomotion rc_control"),
+}
+
+# nombre -> (título, comando local). El mando DualSense se lee en el PC y
+# rc_control publica /motor_cmd hacia la Pi por la red (ROS_STATIC_PEERS).
+LOCAL_NODES = {
+    "visor": ("Visor de video (base.launch)", None),   # comando según Pi/fuente
+    "joy": ("Mando: joy_node", ["ros2", "run", "joy", "joy_node"]),
+    "rc": ("Mando: rc_control", ["ros2", "run", "locomotion", "rc_control"]),
 }
 
 SSH_OPTS = [
@@ -113,7 +119,7 @@ class Panel(tk.Tk):
         self.source = tk.StringVar(value="csi:0")
         self.remote_state = {}      # nombre -> bool
         self.reachable = False
-        self.local_proc = None
+        self.local_procs = {}
         self.busy = set()
         self._build()
         self.after(100, self.find)
@@ -153,13 +159,17 @@ class Panel(tk.Tk):
 
         loc = ttk.LabelFrame(self, text="En este PC", padding=8)
         loc.pack(fill="x", padx=8, pady=4)
-        r = ttk.Frame(loc)
-        r.pack(fill="x")
-        self.ldot = ttk.Label(r, text="●", foreground="#888", width=2)
-        self.ldot.pack(side="left")
-        ttk.Label(r, text="Visor de video (base.launch)", width=34).pack(side="left")
-        self.lbtn = ttk.Button(r, text="Iniciar", width=9, command=self.toggle_local)
-        self.lbtn.pack(side="left", padx=2)
+        self.lrows = {}
+        for name, (title, _cmd) in LOCAL_NODES.items():
+            r = ttk.Frame(loc)
+            r.pack(fill="x", pady=2)
+            dot = ttk.Label(r, text="●", foreground="#888", width=2)
+            dot.pack(side="left")
+            ttk.Label(r, text=title, width=34).pack(side="left")
+            b = ttk.Button(r, text="Iniciar", width=9,
+                           command=lambda n=name: self.toggle_local(n))
+            b.pack(side="left", padx=2)
+            self.lrows[name] = (dot, b)
 
         self.out = tk.Text(self, height=10, state="disabled", wrap="word")
         self.out.pack(fill="both", expand=True, padx=8, pady=8)
@@ -251,33 +261,47 @@ class Panel(tk.Tk):
     def _tick(self):
         if self.host.get().strip() and not self.busy:
             self._poll()
-        if self.local_proc and self.local_proc.poll() is not None:
-            self.local_proc = None
-        on = self.local_proc is not None
-        self.ldot.configure(foreground="#1b7f3b" if on else "#888")
-        self.lbtn.configure(text="Detener" if on else "Iniciar")
+        for name, (dot, btn) in self.lrows.items():
+            p = self.local_procs.get(name)
+            if p and p.poll() is not None:
+                self.say(f"{name} terminó (código {p.returncode}).")
+                p = self.local_procs.pop(name)
+                p = None
+            on = p is not None
+            dot.configure(foreground="#1b7f3b" if on else "#888")
+            btn.configure(text="Detener" if on else "Iniciar")
         self.after(int(POLL_S * 1000), self._tick)
 
     # ---- nodo local ---------------------------------------------------
-    def toggle_local(self):
-        if self.local_proc:
-            os.killpg(self.local_proc.pid, signal.SIGINT)
-            self.say("Visor detenido.")
+    def toggle_local(self, name):
+        p = self.local_procs.get(name)
+        if p:
+            os.killpg(p.pid, signal.SIGINT)
+            self.say(f"{name} detenido.")
+            self.local_procs.pop(name)
             return
-        host = self.host.get().strip() or "auto"
-        cmd = ["ros2", "launch", "vision", "base.launch.py",
-               f"rover:={host}", f"source:={self.source.get()}"]
+        host = self.host.get().strip()
+        cmd = LOCAL_NODES[name][1]
+        if cmd is None:   # visor
+            cmd = ["ros2", "launch", "vision", "base.launch.py",
+                   f"rover:={host or 'auto'}", f"source:={self.source.get()}"]
+        env = dict(os.environ, ROS_DOMAIN_ID=ROS_DOMAIN_ID)
+        if host:   # sin multicast, ROS necesita saber dónde está la Pi
+            env["ROS_STATIC_PEERS"] = host
+        elif name != "visor":
+            self.say("Aviso: sin IP de la Pi, /motor_cmd puede no llegar (usa Buscar).")
         try:
-            self.local_proc = subprocess.Popen(cmd, start_new_session=True)
-            self.say("Visor iniciado: " + " ".join(cmd))
+            self.local_procs[name] = subprocess.Popen(
+                cmd, env=env, start_new_session=True)
+            self.say(f"{name} iniciado: " + " ".join(cmd))
         except FileNotFoundError:
             self.say("No encuentro `ros2`: abre el panel desde una terminal "
                      "con el workspace cargado (source install/setup.bash).")
 
     def _close(self):
-        if self.local_proc:
+        for p in self.local_procs.values():
             try:
-                os.killpg(self.local_proc.pid, signal.SIGINT)
+                os.killpg(p.pid, signal.SIGINT)
             except ProcessLookupError:
                 pass
         self.destroy()   # los nodos de la Pi siguen corriendo a propósito
