@@ -14,20 +14,20 @@ Device.pin_factory = LGPIOFactory(chip=0)
 # Cada motor usa (IN_forward, IN_backward). Por puente: IN1,IN2 = motor
 # izquierdo; IN3,IN4 = motor derecho.
 #   Puente H 1 (front): IN1..IN4 = GPIO 19, 13, 6, 5   -> físicos 35,33,31,29
-#   Puente H 2 (mid):   IN1..IN4 = GPIO 21, 7, 20, 1   -> físicos 40,26,38,28
+#   Puente H 2 (mid):   IN1..IN4 = GPIO 21, 14, 20, 15  -> físicos 40,8,38,10
 #   Puente H 3 (rear):  IN1..IN4 = GPIO 23, 24, 17, 27 -> físicos 16,18,11,13
-# Nota: GPIO 7 es SPI0 CE1 y GPIO 1 es ID_SC (I2C de la EEPROM de HATs).
+# Nota: GPIO 14/15 son UART0 TXD/RXD; la consola serie debe estar desactivada.
 # ¡AJUSTAR según el cableado real de cada puente H antes de energizar!
 # =========================
 MOTOR_PINS = {
     # lado izquierdo (IN1, IN2)
-    "front_left": (19, 13),    # puente H 1
-    "mid_left":   (21, 7),     # puente H 2
-    "rear_left":  (23, 24),    # puente H 3
+    "front_left": (6, 5),    # puente H 1 #6,5
+    "mid_left":   (15, 20),    # puente H 2 #PENDIENTE PINES
+    "rear_left":  (17, 27),    # puente H 3 #17,27
     # lado derecho (IN3, IN4)
-    "front_right": (6, 5),     # puente H 1
-    "mid_right":   (20, 1),    # puente H 2
-    "rear_right":  (17, 27),   # puente H 3
+    "front_right": (13, 19),     # puente H 1 #13,19
+    "mid_right":   (14, 21),   # puente H 2 #14,21
+    "rear_right":  (23, 24),   # puente H 3 #23,24
 }
 
 LEFT_MOTORS = ("front_left", "mid_left", "rear_left")
@@ -83,7 +83,7 @@ class MotorCommand(Node):
             self.motors_[name].value = left_cmd
         for name in RIGHT_MOTORS:
             self.motors_[name].value = right_cmd
-        #self.motors_["rear_right"].value = left_cmd
+        #self.motors_["mid_left"].value = left_cmd
 
 
     def destroy_node(self):

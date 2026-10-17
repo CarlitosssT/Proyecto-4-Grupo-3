@@ -35,6 +35,8 @@ setup(
             'link_echo_node=vision.link_echo_node:main',
             # Encontrar la Pi en la red sin saber su IP
             'find_rover=vision.rover_beacon:main',
+            # Panel gráfico para abrir/cerrar nodos de la Pi desde el PC
+            'rover_panel=vision.rover_panel:main',
         ],
     },
 )

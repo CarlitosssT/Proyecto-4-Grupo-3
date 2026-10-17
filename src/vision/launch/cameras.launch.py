@@ -10,7 +10,8 @@ tiene UN solo puerto CSI y la Pi 5 tiene dos. Si tu rover necesita cámara
 frontal y trasera, la configuración real va a ser mixta.
 
 Uso:
-    ros2 launch vision cameras.launch.py sources:=usb:0
+    ros2 launch vision cameras.launch.py            # csi:0 por defecto
+    ros2 launch vision cameras.launch.py sources:=usb:0   # webcam de respaldo
     ros2 launch vision cameras.launch.py sources:=csi:0,usb:2 fps:=30
     ros2 launch vision cameras.launch.py sources:=csi:0 encode_mode:=hardware
 """
@@ -21,7 +22,7 @@ from launch_ros.actions import Node
 
 
 ARGS = [
-    ("sources", "usb:0", "Fuentes separadas por coma: usb:N o csi:N"),
+    ("sources", "csi:0", "Fuentes separadas por coma: csi:N o usb:N"),
     ("width", "640", "Ancho de captura"),
     ("height", "480", "Alto de captura"),
     ("fps", "30", "Cuadros por segundo"),

@@ -36,10 +36,10 @@ Controla 6 motores DC agrupados en 3 puentes H (2 motores por puente), organizad
 | Puente H | Motores | IN1, IN2 (izq.) | IN3, IN4 (der.) |
 |---|---|---|---|
 | 1 (front) | front_left, front_right | 19, 13 | 6, 5 |
-| 2 (mid) | mid_left, mid_right | 21, 7 | 20, 1 |
+| 2 (mid) | mid_left, mid_right | 21, 14 | 20, 15 |
 | 3 (rear) | rear_left, rear_right | 23, 24 | 17, 27 |
 
-Ojo: el puente 2 usa GPIO 7 (SPI0 CE1) y GPIO 1 (ID_SC, EEPROM de HATs); I2C principal (GPIO 2,3) y UART quedan libres.
+Ojo: el puente 2 usa GPIO 14 y 15 (UART0 TXD/RXD); desactiva la consola serie (raspi-config → Interface → Serial Port → login shell: No).
 
 ### Uso
 
