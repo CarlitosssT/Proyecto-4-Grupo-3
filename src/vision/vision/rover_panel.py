@@ -51,6 +51,8 @@ REMOTE_NODES = {
                "ros2 launch vision rover.launch.py source:={source}"),
     "motores": ("Motores (motor_command)",
                 "ros2 run locomotion motor_command"),
+    "herramienta": ("Herramienta (tool_command)",
+                    "ros2 run locomotion tool_command"),
 }
 
 # nombre -> (título, comando local). El mando DualSense se lee en el PC y
