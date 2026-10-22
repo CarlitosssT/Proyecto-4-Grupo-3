@@ -45,6 +45,29 @@ REMOTE_WS = "~/proyecto-4-grupo-3"
 ROS_DOMAIN_ID = "42"
 POLL_S = 3.0
 
+
+def _find_ws():
+    """Raíz del workspace local (carpeta con src/ y build/ o install/)."""
+    d = os.path.dirname(os.path.realpath(__file__))
+    while d != os.path.dirname(d):
+        if os.path.isdir(os.path.join(d, "src")) and (
+                os.path.isdir(os.path.join(d, "install"))
+                or os.path.isdir(os.path.join(d, "build"))):
+            return d
+        d = os.path.dirname(d)
+    return os.getcwd()
+
+
+LOCAL_WS = _find_ws()
+
+# La terminal de VS Code (snap) exporta rutas a librerías de core20 que
+# rompen las apps Qt/GTK con "undefined symbol: __libc_pthread_init".
+SNAP_ENV_VARS = (
+    "GTK_PATH", "GTK_EXE_PREFIX", "GDK_PIXBUF_MODULE_FILE",
+    "GDK_PIXBUF_MODULEDIR", "GIO_MODULE_DIR", "GSETTINGS_SCHEMA_DIR",
+    "LOCPATH", "GTK_IM_MODULE_FILE",
+)
+
 # nombre -> (título, comando en la Pi). {source} se rellena desde el panel.
 REMOTE_NODES = {
     "camara": ("Cámara + monitor (rover.launch)",
@@ -122,7 +145,10 @@ class Panel(tk.Tk):
         self.remote_state = {}      # nombre -> bool
         self.reachable = False
         self.local_procs = {}
+        self.mode_proc = None
         self.busy = set()
+        self.pkg_vars = {}
+        self.building = False
         self._build()
         self.after(100, self.find)
         self.after(500, self._tick)
@@ -173,8 +199,88 @@ class Panel(tk.Tk):
             b.pack(side="left", padx=2)
             self.lrows[name] = (dot, b)
 
+        self.mode_lbl = tk.Label(loc, text="Herramienta: —", font=("TkDefaultFont", 13, "bold"),
+                                 fg="white", bg="#888", pady=4)
+        self.mode_lbl.pack(fill="x", pady=(6, 0))
+
+        ttk.Button(self, text="Detener todos los nodos",
+                   command=self.stop_all).pack(fill="x", padx=8, pady=4)
+
+        bld = ttk.LabelFrame(self, text="Compilar (colcon build)", padding=8)
+        bld.pack(fill="x", padx=8, pady=4)
+        pk = ttk.Frame(bld)
+        pk.pack(fill="x")
+        ttk.Label(pk, text="Paquetes:").pack(side="left")
+        for pkg in self._packages():
+            v = tk.BooleanVar(value=True)
+            self.pkg_vars[pkg] = v
+            ttk.Checkbutton(pk, text=pkg, variable=v).pack(side="left", padx=6)
+        bb = ttk.Frame(bld)
+        bb.pack(fill="x", pady=(6, 0))
+        self.build_pc = ttk.Button(bb, text="Compilar en este PC",
+                                   command=lambda: self.build("pc"))
+        self.build_pc.pack(side="left", padx=2)
+        self.build_pi = ttk.Button(bb, text="Compilar en la Pi",
+                                   command=lambda: self.build("pi"))
+        self.build_pi.pack(side="left", padx=2)
+
         self.out = tk.Text(self, height=10, state="disabled", wrap="word")
         self.out.pack(fill="both", expand=True, padx=8, pady=8)
+
+    def _packages(self):
+        src = os.path.join(LOCAL_WS, "src")
+        found = sorted(
+            os.path.basename(os.path.dirname(f))
+            for f in glob.glob(os.path.join(src, "*", "package.xml")))
+        return found or ["vision", "locomotion"]
+
+    # ---- detener todo / compilar --------------------------------------
+    def stop_all(self):
+        for name in list(self.local_procs):
+            self.toggle_local(name)
+        for name, on in list(self.remote_state.items()):
+            if on and name not in self.busy:
+                self.toggle(name)
+
+    def build(self, where):
+        pkgs = [p for p, v in self.pkg_vars.items() if v.get()]
+        if not pkgs:
+            self.say("Selecciona al menos un paquete.")
+            return
+        if self.building:
+            self.say("Ya hay una compilación en curso.")
+            return
+        self.building = True
+        for b in (self.build_pc, self.build_pi):
+            b.state(["disabled"])
+        args = "--symlink-install --packages-select " + " ".join(pkgs)
+        self.say(f"Compilando [{' '.join(pkgs)}] en {'la Pi' if where == 'pi' else 'este PC'}...")
+
+        def work():
+            if where == "pi":
+                script = (f"{PROLOGUE}\ncd {REMOTE_WS} && colcon build {args} 2>&1 | tail -n 25"
+                          "; exit ${PIPESTATUS[0]}")
+                rc, out = self._ssh(script, timeout=900)
+            else:
+                cmd = ('for f in /opt/ros/*/setup.bash; do . "$f"; done; '
+                       f'cd {shlex.quote(LOCAL_WS)} && colcon build {args} 2>&1 | tail -n 25'
+                       '; exit ${PIPESTATUS[0]}')
+                try:
+                    p = subprocess.run(["bash", "-c", cmd], capture_output=True,
+                                       text=True, timeout=900)
+                    rc, out = p.returncode, p.stdout.strip()
+                except subprocess.TimeoutExpired:
+                    rc, out = 1, "colcon build: tiempo agotado."
+            self.after(0, lambda: self._build_done(rc, out))
+        self._bg(work)
+
+    def _build_done(self, rc, out):
+        self.building = False
+        for b in (self.build_pc, self.build_pi):
+            b.state(["!disabled"])
+        self.say(out)
+        self.say("Compilación terminada." if rc == 0
+                 else f"La compilación falló (código {rc}).")
 
     def say(self, text):
         self.out.configure(state="normal")
@@ -281,13 +387,16 @@ class Panel(tk.Tk):
             os.killpg(p.pid, signal.SIGINT)
             self.say(f"{name} detenido.")
             self.local_procs.pop(name)
+            if name == "rc":
+                self._stop_mode_watch()
             return
         host = self.host.get().strip()
         cmd = LOCAL_NODES[name][1]
         if cmd is None:   # visor
             cmd = ["ros2", "launch", "vision", "base.launch.py",
                    f"rover:={host or 'auto'}", f"source:={self.source.get()}"]
-        env = dict(os.environ, ROS_DOMAIN_ID=ROS_DOMAIN_ID)
+        env = {k: v for k, v in os.environ.items() if k not in SNAP_ENV_VARS}
+        env["ROS_DOMAIN_ID"] = ROS_DOMAIN_ID
         if host:   # sin multicast, ROS necesita saber dónde está la Pi
             env["ROS_STATIC_PEERS"] = host
         elif name != "visor":
@@ -296,11 +405,52 @@ class Panel(tk.Tk):
             self.local_procs[name] = subprocess.Popen(
                 cmd, env=env, start_new_session=True)
             self.say(f"{name} iniciado: " + " ".join(cmd))
+            if name == "rc":
+                self._start_mode_watch(env)
         except FileNotFoundError:
             self.say("No encuentro `ros2`: abre el panel desde una terminal "
                      "con el workspace cargado (source install/setup.bash).")
 
+    # ---- modo de la herramienta (servo / stepper) ----------------------
+    def _start_mode_watch(self, env):
+        self._stop_mode_watch()
+        cmd = ["ros2", "topic", "echo", "/tool_mode", "std_msgs/msg/String", "--field", "data",
+               "--qos-durability", "transient_local", "--qos-reliability", "reliable"]
+        try:
+            proc = subprocess.Popen(
+                cmd, env={**env, "PYTHONUNBUFFERED": "1"}, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                start_new_session=True)
+        except FileNotFoundError:
+            return
+        self.mode_proc = proc
+        self._set_mode(None)
+
+        def read():
+            for line in proc.stdout:
+                mode = line.strip()
+                if mode in ("stepper", "servo"):
+                    self.after(0, lambda m=mode: self._set_mode(m))
+        self._bg(read)
+
+    def _stop_mode_watch(self):
+        p, self.mode_proc = self.mode_proc, None
+        if p:
+            try:
+                os.killpg(p.pid, signal.SIGINT)
+            except ProcessLookupError:
+                pass
+        self._set_mode(None)
+
+    def _set_mode(self, mode):
+        text, color = {
+            "stepper": ("Herramienta: STEPPER", "#1565c0"),
+            "servo": ("Herramienta: SERVO", "#e65100"),
+        }.get(mode, ("Herramienta: —", "#888"))
+        self.mode_lbl.configure(text=text, bg=color)
+
     def _close(self):
+        self._stop_mode_watch()
         for p in self.local_procs.values():
             try:
                 os.killpg(p.pid, signal.SIGINT)

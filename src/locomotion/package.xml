@@ -12,6 +12,7 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>gpiozero</depend>
+  <exec_depend>python3-serial</exec_depend>
   <exec_depend>joy</exec_depend>
 
   <test_depend>ament_copyright</test_depend>

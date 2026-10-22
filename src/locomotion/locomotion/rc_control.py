@@ -9,7 +9,8 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Int32
+from std_msgs.msg import Int32, String
+from rclpy.qos import QoSProfile, DurabilityPolicy
 
 # PS5 DualSense — ejes (verificar con `ros2 topic echo /joy`, puede variar
 # según el driver/udev rules del sistema)
@@ -40,11 +41,16 @@ class RCControlNode(Node):
         self.stepper_pub_ = self.create_publisher(Int32, "/stepper_steps", 10)
         self.servo_pub_ = self.create_publisher(Int32, "/servo_delta", 10)
 
+        # Latched: el panel recibe el modo actual aunque se conecte después
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.mode_pub_ = self.create_publisher(String, "/tool_mode", latched)
+
         self.latest_joy_ = None
         self.tool_mode_ = MODE_STEPPER
         self.prev_cross_ = False
         self.last_tool_cmd_ = 0.0
         self.timer_ = self.create_timer(0.02, self.main_loop)  # 50 Hz
+        self.publish_mode()
 
         self.get_logger().info(
             "rc_control_node listo\n"
@@ -52,6 +58,9 @@ class RCControlNode(Node):
             "  Herramienta : X=alternar stepper/servo  R1=positivo  L1=negativo\n"
             f"  Modo inicial: {self.tool_mode_}"
         )
+
+    def publish_mode(self):
+        self.mode_pub_.publish(String(data=self.tool_mode_))
 
     def gamepad_callback(self, msg: Joy):
         self.latest_joy_ = msg
@@ -86,6 +95,7 @@ class RCControlNode(Node):
                 MODE_SERVO if self.tool_mode_ == MODE_STEPPER else MODE_STEPPER
             )
             self.get_logger().info(f"Herramienta: modo {self.tool_mode_}")
+            self.publish_mode()
         self.prev_cross_ = cross
 
         direction = int(bool(joy.buttons[BTN_R1])) - int(bool(joy.buttons[BTN_L1]))
