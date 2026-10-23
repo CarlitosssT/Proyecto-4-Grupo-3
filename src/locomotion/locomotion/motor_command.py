@@ -21,13 +21,13 @@ Device.pin_factory = LGPIOFactory(chip=0)
 # =========================
 MOTOR_PINS = {
     # lado izquierdo (IN1, IN2)
-    "front_left": (6, 5),    # puente H 1 #6,5
+    "front_left": (5, 6),    # puente H 1 #6,5
     "mid_left":   (15, 20),    # puente H 2 #PENDIENTE PINES
-    "rear_left":  (17, 27),    # puente H 3 #17,27
+    "rear_left":  (27, 17),    # puente H 3 #17,27
     # lado derecho (IN3, IN4)
     "front_right": (13, 19),     # puente H 1 #13,19
     "mid_right":   (14, 21),   # puente H 2 #14,21
-    "rear_right":  (23, 24),   # puente H 3 #23,24
+    "rear_right":  (24, 23),   # puente H 3 #23,24
 }
 
 LEFT_MOTORS = ("front_left", "mid_left", "rear_left")
@@ -83,7 +83,7 @@ class MotorCommand(Node):
             self.motors_[name].value = left_cmd
         for name in RIGHT_MOTORS:
             self.motors_[name].value = right_cmd
-        #self.motors_["mid_left"].value = left_cmd
+        #self.motors_["rear_right"].value = left_cmd
 
 
     def destroy_node(self):
