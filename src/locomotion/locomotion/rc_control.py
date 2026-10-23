@@ -27,7 +27,7 @@ BTN_R1 = 5     # positivo
 MODE_STEPPER = "stepper"
 MODE_SERVO = "servo"
 
-STEPPER_CHUNK = 50          # pasos por comando mientras se mantiene R1/L1
+STEPPER_CHUNK = 100          # pasos por comando mientras se mantiene R1/L1
 STEPPER_REPEAT_S = 0.15     # ~ lo que tarda el stepper en dar el chunk a 400 pasos/s
 SERVO_STEP_DEG = 1          # grados por comando mientras se mantiene R1/L1
 SERVO_REPEAT_S = 0.03       # ~33 °/s (la prueba del Arduino iba a ~66 °/s)
@@ -65,7 +65,7 @@ class RCControlNode(Node):
     def gamepad_callback(self, msg: Joy):
         self.latest_joy_ = msg
 
-    def linear_remap(self, value, a=-1.0, b=1.0, c=0.0, d=1.0):
+    def linear_remap(self, value, a=-1.0, b=1.0, c=0.0, d=0.5):
         return (d - c) * (value - a) / (b - a) + c
 
     def main_loop(self):
@@ -112,7 +112,7 @@ class RCControlNode(Node):
 
         out = Int32()
         if self.tool_mode_ == MODE_STEPPER:
-            out.data = direction * STEPPER_CHUNK
+            out.data = direction * -STEPPER_CHUNK
             self.stepper_pub_.publish(out)
         else:
             out.data = direction * SERVO_STEP_DEG
