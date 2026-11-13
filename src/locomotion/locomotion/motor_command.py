@@ -8,22 +8,25 @@ from locomotion.pca9685 import PCA9685
 
 
 # =========================
-# Canales del PCA9685 — 3 puentes H (2 motores por puente)
-# Cada motor usa (IN_forward, IN_backward). Por puente: IN1,IN2 = motor
-# izquierdo; IN3,IN4 = motor derecho.
-#   Puente H 1 (front): IN1..IN4 = canales 0, 1, 2, 3
-#   Puente H 2 (mid):   IN1..IN4 = canales 4, 5, 6, 7
-#   Puente H 3 (rear):  IN1..IN4 = canales 8, 9, 10, 11
+# Canales del PCA9685 — 3 puentes H TB6612FNG (2 motores por puente)
+# PWMA y PWMB van fijos a VCC (3.3 V): el PWM se aplica sobre AIN1/AIN2 y
+# BIN1/BIN2 (IN1=PWM, IN2=L -> avance/libre; IN1=L, IN2=PWM -> reversa/libre).
+# Cada motor usa (IN_forward, IN_backward). Por puente: A = motor izquierdo,
+# B = motor derecho.
+#   Puente H 1 (front): AIN1, AIN2, BIN1, BIN2 = canales 0, 1, 2, 3
+#   Puente H 2 (mid):   AIN1, AIN2, BIN1, BIN2 = canales 4, 5, 6, 7
+#   Puente H 3 (rear):  AIN1, AIN2, BIN1, BIN2 = canales 8, 9, 10, 11
+# STBY de los 3 puentes va fijo a 5 V (siempre habilitados).
 # Canales 12..15 libres.
 # Si un motor gira al revés, intercambia sus dos canales aquí (o sus cables).
 # ¡AJUSTAR según el cableado real de cada puente H antes de energizar!
 # =========================
 MOTOR_CHANNELS = {
-    # lado izquierdo (IN1, IN2)
+    # lado izquierdo (AIN1, AIN2)
     "front_left": (0, 1),    # puente H 1
     "mid_left":   (4, 5),    # puente H 2
     "rear_left":  (8, 9),    # puente H 3
-    # lado derecho (IN3, IN4)
+    # lado derecho (BIN1, BIN2)
     "front_right": (2, 3),   # puente H 1
     "mid_right":   (6, 7),   # puente H 2
     "rear_right":  (10, 11), # puente H 3
@@ -35,7 +38,7 @@ RIGHT_MOTORS = ("front_right", "mid_right", "rear_right")
 
 class PCAMotor:
     """Motor DC en un puente H con PWM sobre IN_forward o IN_backward
-    (mismo comportamiento que gpiozero.Motor con pwm=True)."""
+    (el otro IN queda en bajo)."""
 
     def __init__(self, pca, forward, backward):
         self.pca_ = pca
