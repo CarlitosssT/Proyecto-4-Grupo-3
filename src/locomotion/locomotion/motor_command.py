@@ -3,40 +3,76 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from gpiozero import Motor
-from gpiozero.pins.lgpio import LGPIOFactory
-from gpiozero import Device
-Device.pin_factory = LGPIOFactory(chip=0)
+
+from locomotion.pca9685 import PCA9685
 
 
 # =========================
-# Pines GPIO (BCM) — 3 puentes H (2 motores por puente)
+# Canales del PCA9685 — 3 puentes H (2 motores por puente)
 # Cada motor usa (IN_forward, IN_backward). Por puente: IN1,IN2 = motor
 # izquierdo; IN3,IN4 = motor derecho.
-#   Puente H 1 (front): IN1..IN4 = GPIO 19, 13, 6, 5   -> físicos 35,33,31,29
-#   Puente H 2 (mid):   IN1..IN4 = GPIO 21, 14, 20, 15  -> físicos 40,8,38,10
-#   Puente H 3 (rear):  IN1..IN4 = GPIO 23, 24, 17, 27 -> físicos 16,18,11,13
-# Nota: GPIO 14/15 son UART0 TXD/RXD; la consola serie debe estar desactivada.
+#   Puente H 1 (front): IN1..IN4 = canales 0, 1, 2, 3
+#   Puente H 2 (mid):   IN1..IN4 = canales 4, 5, 6, 7
+#   Puente H 3 (rear):  IN1..IN4 = canales 8, 9, 10, 11
+# Canales 12..15 libres.
+# Si un motor gira al revés, intercambia sus dos canales aquí (o sus cables).
 # ¡AJUSTAR según el cableado real de cada puente H antes de energizar!
 # =========================
-MOTOR_PINS = {
+MOTOR_CHANNELS = {
     # lado izquierdo (IN1, IN2)
-    "front_left": (5, 6),    # puente H 1 #6,5
-    "mid_left":   (15, 20),    # puente H 2 #PENDIENTE PINES
-    "rear_left":  (27, 17),    # puente H 3 #17,27
+    "front_left": (0, 1),    # puente H 1
+    "mid_left":   (4, 5),    # puente H 2
+    "rear_left":  (8, 9),    # puente H 3
     # lado derecho (IN3, IN4)
-    "front_right": (13, 19),     # puente H 1 #13,19
-    "mid_right":   (14, 21),   # puente H 2 #14,21
-    "rear_right":  (24, 23),   # puente H 3 #23,24
+    "front_right": (2, 3),   # puente H 1
+    "mid_right":   (6, 7),   # puente H 2
+    "rear_right":  (10, 11), # puente H 3
 }
 
 LEFT_MOTORS = ("front_left", "mid_left", "rear_left")
 RIGHT_MOTORS = ("front_right", "mid_right", "rear_right")
 
 
+class PCAMotor:
+    """Motor DC en un puente H con PWM sobre IN_forward o IN_backward
+    (mismo comportamiento que gpiozero.Motor con pwm=True)."""
+
+    def __init__(self, pca, forward, backward):
+        self.pca_ = pca
+        self.forward_ = forward
+        self.backward_ = backward
+        self.value_ = None  # fuerza la primera escritura
+
+    @property
+    def value(self):
+        return self.value_ or 0.0
+
+    @value.setter
+    def value(self, value):
+        value = max(-1.0, min(1.0, value))
+        if value == self.value_:
+            return  # evita tráfico I2C innecesario
+        self.pca_.set_duty(self.forward_, max(value, 0.0))
+        self.pca_.set_duty(self.backward_, max(-value, 0.0))
+        self.value_ = value
+
+    def stop(self):
+        self.value = 0.0
+
+
 class MotorCommand(Node):
     def __init__(self):
         super().__init__("motor_command")
+
+        self.declare_parameter("i2c_bus", 1)
+        self.declare_parameter("i2c_address", 0x40)
+        self.declare_parameter("pwm_frequency", 1000)
+
+        self.pca_ = PCA9685(
+            bus=self.get_parameter("i2c_bus").value,
+            address=self.get_parameter("i2c_address").value,
+            frequency=self.get_parameter("pwm_frequency").value,
+        )
 
         self.cmd_subscription_ = self.create_subscription(
             Twist,
@@ -49,11 +85,11 @@ class MotorCommand(Node):
         self.timer_ = self.create_timer(0.02, self.main_loop)  # 50 Hz
 
         self.motors_ = {
-            name: Motor(forward=fwd, backward=bwd, pwm=True)
-            for name, (fwd, bwd) in MOTOR_PINS.items()
+            name: PCAMotor(self.pca_, fwd, bwd)
+            for name, (fwd, bwd) in MOTOR_CHANNELS.items()
         }
 
-        self.get_logger().info("Nodo motor_command iniciado (6 motores / 3 puentes H).")
+        self.get_logger().info("Nodo motor_command iniciado (6 motores / 3 puentes H vía PCA9685).")
         self.get_logger().info("Suscrito a /motor_cmd")
         self.get_logger().info(f"Lado izquierdo: {LEFT_MOTORS}")
         self.get_logger().info(f"Lado derecho:   {RIGHT_MOTORS}")
@@ -89,6 +125,7 @@ class MotorCommand(Node):
     def destroy_node(self):
         for motor in self.motors_.values():
             motor.stop()
+        self.pca_.close()
         super().destroy_node()
 
 
@@ -101,8 +138,6 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        for motor in node.motors_.values():
-            motor.stop()
         node.destroy_node()
         rclpy.shutdown()
 
