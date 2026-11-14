@@ -44,6 +44,9 @@ REMOTE_USER = "ubuntu"
 REMOTE_WS = "~/proyecto-4-grupo-3"
 ROS_DOMAIN_ID = "42"
 POLL_S = 3.0
+# Logs de los nodos locales. Si el panel se abre con doble clic, su stdout es
+# un pipe sin lector y un nodo que escriba ahí muere por SIGPIPE (código 120).
+LOCAL_LOG_DIR = os.path.expanduser("~/.rover_panel")
 
 
 def _find_ws():
@@ -116,6 +119,14 @@ sleep 1
 kill -0 "$(cat "$D/{name}.pid")" 2>/dev/null && echo "{name} iniciado" \\
   || {{ echo "{name} murió al arrancar:"; tail -n 15 "$D/{name}.log"; exit 1; }}
 """
+
+
+def _tail(path, n=15):
+    try:
+        with open(path, errors="replace") as f:
+            return "".join(f.readlines()[-n:])
+    except OSError:
+        return ""
 
 
 def _stop_script(name):
@@ -372,7 +383,8 @@ class Panel(tk.Tk):
         for name, (dot, btn) in self.lrows.items():
             p = self.local_procs.get(name)
             if p and p.poll() is not None:
-                self.say(f"{name} terminó (código {p.returncode}).")
+                self.say(f"{name} terminó (código {p.returncode}).\n"
+                         + _tail(self._local_log(name)))
                 p = self.local_procs.pop(name)
                 p = None
             on = p is not None
@@ -402,14 +414,21 @@ class Panel(tk.Tk):
         elif name != "visor":
             self.say("Aviso: sin IP de la Pi, /motor_cmd puede no llegar (usa Buscar).")
         try:
-            self.local_procs[name] = subprocess.Popen(
-                cmd, env=env, start_new_session=True)
+            os.makedirs(LOCAL_LOG_DIR, exist_ok=True)
+            with open(self._local_log(name), "w") as log:
+                self.local_procs[name] = subprocess.Popen(
+                    cmd, env=env, start_new_session=True,
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
             self.say(f"{name} iniciado: " + " ".join(cmd))
             if name == "rc":
                 self._start_mode_watch(env)
         except FileNotFoundError:
             self.say("No encuentro `ros2`: abre el panel desde una terminal "
                      "con el workspace cargado (source install/setup.bash).")
+
+    @staticmethod
+    def _local_log(name):
+        return os.path.join(LOCAL_LOG_DIR, f"local_{name}.log")
 
     # ---- modo de la herramienta (servo / stepper) ----------------------
     def _start_mode_watch(self, env):

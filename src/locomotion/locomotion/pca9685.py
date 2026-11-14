@@ -26,6 +26,7 @@ class PCA9685:
     def __init__(self, bus=1, address=0x40, frequency=1000):
         self.address = address
         self.bus = SMBus(bus)
+        self.frequency = frequency  # frecuencia REAL tras redondear el prescaler
 
         self.bus.write_byte_data(self.address, MODE2, MODE2_OUTDRV)
         self.bus.write_byte_data(self.address, MODE1, MODE1_AI)
@@ -37,6 +38,7 @@ class PCA9685:
         # El prescaler solo se puede escribir con el chip dormido.
         prescale = round(OSC_HZ / (4096 * frequency)) - 1
         prescale = max(3, min(255, prescale))  # ~24 Hz .. ~1526 Hz
+        self.frequency = OSC_HZ / (4096 * (prescale + 1))
 
         old_mode = self.bus.read_byte_data(self.address, MODE1)
         self.bus.write_byte_data(self.address, MODE1, (old_mode & ~MODE1_RESTART) | MODE1_SLEEP)
@@ -55,6 +57,11 @@ class PCA9685:
             off = int(duty * 4095)
             data = [0, 0, off & 0xFF, off >> 8]
         self.bus.write_i2c_block_data(self.address, LED0_ON_L + 4 * channel, data)
+
+    def set_pulse_us(self, channel, pulse_us):
+        """Pulso de ancho fijo (servos). Requiere una frecuencia baja (~50 Hz)."""
+        period_us = 1_000_000.0 / self.frequency
+        self.set_duty(channel, pulse_us / period_us)
 
     def all_off(self):
         self.bus.write_byte_data(self.address, ALL_LED_OFF_H, FULL_BIT)

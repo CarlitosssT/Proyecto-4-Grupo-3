@@ -8,6 +8,9 @@ Controles:
   a / d   → girar izquierda / derecha
   espacio → detener (velocidad y giro a 0)
   q       → salir
+
+Este nodo no arma: con el arming switch hay que lanzar motor_command con
+  --ros-args -p require_arm:=false
 """
 import select
 import sys
@@ -83,13 +86,14 @@ def main(args=None):
                 node.angular_ = 0.0
             elif key in ('q', '\x03'):  # q o Ctrl+C
                 break
-            else:
-                continue
 
+            # Se publica en cada vuelta (~10 Hz) aunque no haya tecla: motor_command
+            # frena si pasan más de cmd_timeout sin /motor_cmd.
             node.publish_cmd()
-            node.get_logger().info(
-                f"linear={node.linear_:+.2f}  angular={node.angular_:+.2f}"
-            )
+            if key in ('w', 's', 'a', 'd', ' '):
+                node.get_logger().info(
+                    f"linear={node.linear_:+.2f}  angular={node.angular_:+.2f}"
+                )
     finally:
         node.linear_ = 0.0
         node.angular_ = 0.0
