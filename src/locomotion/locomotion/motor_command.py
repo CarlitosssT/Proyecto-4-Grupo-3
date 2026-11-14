@@ -20,7 +20,8 @@ from locomotion.pca9685 import PCA9685
 #   Puente H 3 (rear):  AIN1, AIN2, BIN1, BIN2 = canales 8, 9, 10, 11
 # STBY de los 3 puentes va fijo a 5 V (siempre habilitados).
 # Canal 12: servo de inclinación de la cámara (parámetro cam_channel).
-# Canales 13..15 libres.
+# Canal 13: servo de la pala de excavación (parámetro shovel_channel).
+# Canales 14..15 libres.
 # Si un motor gira al revés, intercambia sus dos canales aquí (o sus cables).
 # ¡AJUSTAR según el cableado real de cada puente H antes de energizar!
 # =========================
@@ -95,6 +96,10 @@ class PCAServo:
     def angle(self):
         return self.angle_
 
+    @property
+    def target(self):
+        return self.target_
+
     def nudge(self, delta):
         """Movimiento del stick: pasos chicos, se escriben directo."""
         new = self.clamp(self.angle_ + delta)
@@ -136,6 +141,13 @@ class MotorCommand(Node):
         self.declare_parameter("cam_start_deg", 90)
         self.declare_parameter("cam_pulse_min_us", 500)
         self.declare_parameter("cam_pulse_max_us", 2400)
+        # Servo de la pala (antes en la ESP32): mismos límites, arranque y pulsos
+        self.declare_parameter("shovel_channel", 13)
+        self.declare_parameter("shovel_min_deg", 5)
+        self.declare_parameter("shovel_max_deg", 130)
+        self.declare_parameter("shovel_start_deg", 30)
+        self.declare_parameter("shovel_pulse_min_us", 500)
+        self.declare_parameter("shovel_pulse_max_us", 2400)
 
         self.pca_ = PCA9685(
             bus=self.get_parameter("i2c_bus").value,
@@ -164,7 +176,7 @@ class MotorCommand(Node):
         if self.pca_.frequency > 100:
             self.get_logger().warn(
                 f"pwm_frequency={self.pca_.frequency:.0f} Hz: un servo estándar "
-                "necesita ~50 Hz, la cámara no se va a mover bien.")
+                "necesita ~50 Hz, la cámara y la pala no se van a mover bien.")
         self.cam_ = PCAServo(
             self.pca_,
             channel=self.get_parameter("cam_channel").value,
@@ -178,6 +190,25 @@ class MotorCommand(Node):
                                  lambda m: self.cam_.nudge(m.data), 10)
         self.create_subscription(Int32, "/camera_tilt_angle",
                                  lambda m: self.cam_.goto(m.data), 10)
+
+        # Pala: siempre con rampa (va cargada). 1°/ciclo a 50 Hz = 50 °/s,
+        # parecido a los 15 ms por grado que usaba la ESP.
+        self.shovel_ = PCAServo(
+            self.pca_,
+            channel=self.get_parameter("shovel_channel").value,
+            min_deg=self.get_parameter("shovel_min_deg").value,
+            max_deg=self.get_parameter("shovel_max_deg").value,
+            start_deg=self.get_parameter("shovel_start_deg").value,
+            pulse_min_us=self.get_parameter("shovel_pulse_min_us").value,
+            pulse_max_us=self.get_parameter("shovel_pulse_max_us").value,
+            deg_per_tick=1,
+        )
+        # Los deltas se suman al destino pendiente (igual que "d<n>" en la ESP)
+        self.create_subscription(
+            Int32, "/servo_delta",
+            lambda m: self.shovel_.goto(self.shovel_.target + m.data), 10)
+        self.create_subscription(Int32, "/servo_angle",
+                                 lambda m: self.shovel_.goto(m.data), 10)
         self.timer_ = self.create_timer(0.02, self.main_loop)  # 50 Hz
 
         self.motors_ = {
@@ -186,12 +217,15 @@ class MotorCommand(Node):
         }
 
         self.get_logger().info("Nodo motor_command iniciado (6 motores / 3 puentes H vía PCA9685).")
-        self.get_logger().info("Suscrito a /motor_cmd, /armed, /camera_tilt_delta, /camera_tilt_angle")
+        self.get_logger().info(
+            "Suscrito a /motor_cmd, /armed, /camera_tilt_delta, /camera_tilt_angle, "
+            "/servo_delta, /servo_angle")
         self.get_logger().info(
             f"require_arm={self.require_arm_}  cmd_timeout={self.cmd_timeout_} s")
         self.get_logger().info(
             f"PWM a {self.pca_.frequency:.1f} Hz. Cámara en canal "
-            f"{self.get_parameter('cam_channel').value}, {self.cam_.angle}°")
+            f"{self.get_parameter('cam_channel').value}, {self.cam_.angle}°. Pala en canal "
+            f"{self.get_parameter('shovel_channel').value}, {self.shovel_.angle}°")
         self.get_logger().info(f"Lado izquierdo: {LEFT_MOTORS}")
         self.get_logger().info(f"Lado derecho:   {RIGHT_MOTORS}")
 
@@ -216,6 +250,7 @@ class MotorCommand(Node):
 
     def main_loop(self):
         self.cam_.update()
+        self.shovel_.update()
 
         reason = self.why_stopped()
         if reason != self.stop_reason_:
@@ -257,6 +292,7 @@ class MotorCommand(Node):
         for motor in self.motors_.values():
             motor.stop()
         self.cam_.release()
+        self.shovel_.release()
         self.pca_.close()
         super().destroy_node()
 

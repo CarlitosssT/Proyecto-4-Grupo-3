@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """
-Herramienta de excavación (servo de pala + stepper) vía serial a una ESP32.
+Puente serial con la ESP32 DevKit: stepper de la herramienta + encoders.
 
-La ESP32 (firmware/tool_esp32/tool_esp32.ino) mueve el servo y el stepper; este
-nodo solo traduce los tópicos de ROS 2 a comandos de texto por USB-serial.
+La ESP32 (firmware/tool_esp32/tool_esp32.ino) mueve el stepper y cuenta los
+pulsos de los 6 encoders. Este nodo es el ÚNICO que abre ese puerto serial:
+traduce los tópicos de ROS 2 a comandos de texto y publica los conteos que
+manda la ESP. Para convertirlos a ángulo y velocidad está encoder_node.
 
-Tópicos (los mismos que antes):
+El servo de la pala ya NO pasa por aquí: va en el PCA9685 y lo mueve
+motor_command (/servo_delta y /servo_angle, los mismos tópicos de antes).
+
+Se suscribe a:
   /stepper_steps  (std_msgs/Int32) pasos RELATIVOS a dar (+/-)       -> "<pasos>"
-  /servo_delta    (std_msgs/Int32) grados a sumar al ángulo (+/-)    -> "d<grados>"
-  /servo_angle    (std_msgs/Int32) ir a un ángulo exacto             -> "g<ángulo>"
   /stepper_stop   (std_msgs/Empty) frena el stepper                  -> "x"
 
-Parámetros: port (/dev/ttyACM0), baudrate (115200).
+Publica:
+  /encoder_ticks  (std_msgs/Int64MultiArray) una por cada línea
+                  "E <micros> <c1> ... <c6>" de la ESP (20 por segundo):
+                  data[0] = micros() de la ESP, data[1..6] = conteos crudos.
+
+Parámetros: port (/dev/ttyUSB0), baudrate (115200).
 Si la ESP se desconecta, el nodo reintenta abrir el puerto cada segundo.
 """
 import threading
@@ -19,14 +27,17 @@ import threading
 import rclpy
 import serial
 from rclpy.node import Node
-from std_msgs.msg import Empty, Int32
+from std_msgs.msg import Empty, Int32, Int64MultiArray
+
+NUM_ENCODERS = 6
 
 
 class ToolCommand(Node):
     def __init__(self):
         super().__init__("tool_command")
 
-        self.declare_parameter("port", "/dev/ttyACM0")
+        # La DevKit (CP2102/CH340) suele aparecer como ttyUSB0; la C3 era ttyACM0
+        self.declare_parameter("port", "/dev/ttyUSB0")
         self.declare_parameter("baudrate", 115200)
 
         self.port_name_ = self.get_parameter("port").value
@@ -35,6 +46,9 @@ class ToolCommand(Node):
         self.lock_ = threading.Lock()
         self.running_ = True
 
+        # Antes de arrancar el hilo lector, que es quien publica
+        self.encoder_pub_ = self.create_publisher(Int64MultiArray, "/encoder_ticks", 10)
+
         self._connect()
         self.reader_ = threading.Thread(target=self._read_loop, daemon=True)
         self.reader_.start()
@@ -42,8 +56,6 @@ class ToolCommand(Node):
 
         self.create_subscription(Int32, "/stepper_steps", self.steps_callback, 10)
         self.create_subscription(Empty, "/stepper_stop", self.stop_callback, 10)
-        self.create_subscription(Int32, "/servo_delta", self.delta_callback, 10)
-        self.create_subscription(Int32, "/servo_angle", self.angle_callback, 10)
 
     # ---------------- serial ----------------
     def _connect(self):
@@ -93,7 +105,7 @@ class ToolCommand(Node):
             self._drop(e)
 
     def _read_loop(self):
-        """Muestra en el log lo que imprime la ESP."""
+        """Publica los reportes de encoders y muestra en el log lo demás."""
         while self.running_:
             with self.lock_:
                 ser = self.ser_
@@ -105,8 +117,22 @@ class ToolCommand(Node):
             except (serial.SerialException, OSError) as e:
                 self._drop(e)
                 continue
-            if line:
+            if line.startswith("E "):
+                self._publish_encoders(line)
+            elif line:
                 self.get_logger().info(f"[ESP] {line}")
+
+    def _publish_encoders(self, line: str):
+        """'E <micros> <c1> ... <c6>' -> /encoder_ticks."""
+        try:
+            values = [int(p) for p in line.split()[1:]]
+        except ValueError:
+            values = []
+        if len(values) != 1 + NUM_ENCODERS:
+            self.get_logger().warn(
+                f"Reporte de encoders incompleto: {line!r}", throttle_duration_sec=5.0)
+            return
+        self.encoder_pub_.publish(Int64MultiArray(data=values))
 
     # ---------------- callbacks ----------------
     def steps_callback(self, msg: Int32):
@@ -116,15 +142,11 @@ class ToolCommand(Node):
     def stop_callback(self, _msg: Empty):
         self._send("x")
 
-    def delta_callback(self, msg: Int32):
-        if msg.data != 0:
-            self._send(f"d{msg.data}")
-
-    def angle_callback(self, msg: Int32):
-        self._send(f"g{msg.data}")
-
     def destroy_node(self):
         self.running_ = False
+        # Espera a que el hilo lector termine su lectura (timeout del serial:
+        # 0.2 s) antes de cerrar el puerto y destruir el publicador que usa.
+        self.reader_.join(timeout=1.0)
         self._send("x")
         with self.lock_:
             ser, self.ser_ = self.ser_, None

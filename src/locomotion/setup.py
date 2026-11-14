@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='robotica',
     maintainer_email='andrescarlos011@gmail.com',
-    description='Control de locomoción: 6 motores DC (3 puentes H) vía DualSense o teclado.',
+    description='Control de locomoción: 6 motores DC (3 puentes H) vía DualSense o teclado, herramienta y encoders.',
     license='TODO: License declaration',
     tests_require=['pytest'],
     entry_points={
@@ -24,6 +24,7 @@ setup(
             'rc_control=locomotion.rc_control:main',
             'keyboard_control=locomotion.keyboard_control:main',
             'tool_command=locomotion.tool_command:main',
+            'encoder_node=locomotion.encoder_node:main',
         ],
     },
 )
