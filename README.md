@@ -49,13 +49,13 @@ Canal 12 → señal del servo de la cámara. Canal 13 → señal del servo de la
 
 | Señal | GPIO |
 |---|---|
-| Stepper STEP, DIR | 18, 4 |
+| Stepper STEP, DIR | 13, 27 |
 | Encoder front_left (A, B) | 32, 33 |
 | Encoder mid_left (A, B) | 25, 26 |
-| Encoder rear_left (A, B) | 27, 13 |
+| Encoder rear_left (A, B) | 18, 4 |
 | Encoder front_right (A, B) | 23, 22 |
 | Encoder mid_right (A, B) | 21, 19 |
-| Encoder rear_right (A, B) | 17, 16 |
+| Encoder rear_right (A, B) | 14, 15 |
 
 Los encoders se alimentan con **3.3 V** de la ESP (con 5 V sus salidas llegarían a 5 V y los pines de la ESP32 solo aguantan 3.3 V) y comparten GND con ella. Los 12 pines llevan pull-up interno. La ESP cuenta por hardware (PCNT), en cuadratura ×4.
 
@@ -114,6 +114,7 @@ ros2 topic echo /wheel_states
 
 - **`camera_node`**: captura frames con OpenCV y los publica como `sensor_msgs/CompressedImage` (JPEG). Parámetros: `video_device`, `frame_rate`, `width`, `height`, `topic`, `frame_id`. QoS `BEST_EFFORT`/`VOLATILE`/`KEEP_LAST(1)` para minimizar latencia de streaming en vivo.
 - **`image_viewer_node`**: se suscribe a un tópico `CompressedImage` y muestra el video en una ventana OpenCV, sin depender de `rqt`. Fuerza el backend Qt `xcb` para evitar problemas de tamaño de ventana bajo Wayland/GNOME.
+- **`rover_panel`** (`./lanzar_panel.sh` en el PC): panel gráfico (Tk) para abrir/cerrar los nodos de la Pi por SSH. El video de la cámara y los datos de las ruedas van **dentro del mismo panel** (sin ventana emergente): el botón «Video + ruedas» suscribe el panel al video, al estado del enlace y a `/wheel_states` (ángulo, vueltas y velocidad de cada rueda). Para ver las ruedas deben estar corriendo `tool_command` y `encoder_node` con `counts_per_rev`. Requiere `python3-tk`, `python3-opencv` y ROS 2 cargado; sin ellos el panel abre pero sin video. `image_viewer_node` sigue disponible como visor aparte.
 - **`cameras.launch.py`**: lanza una instancia de `camera_node` por cada índice de `/dev/video*` indicado.
 
 ### Uso
