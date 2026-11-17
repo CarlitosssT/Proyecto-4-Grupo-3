@@ -27,6 +27,7 @@ si no termina en 5 s, SIGKILL. El estado se lee de esos .pid cada 3 s, por lo
 que el panel refleja la realidad aunque un nodo haya muerto solo.
 """
 import glob
+import math
 import os
 import shlex
 import signal
@@ -40,10 +41,35 @@ try:
 except ImportError:  # corrido como script suelto
     from rover_beacon import find_rover
 
+# Video y ruedas dentro del panel: necesitan ROS 2 + OpenCV. Sin ellos el panel
+# sigue funcionando (solo pierde el video embebido).
+try:
+    import time
+    import json
+    import cv2
+    import rclpy
+    from rclpy.node import Node
+    from rclpy.executors import SingleThreadedExecutor
+    from rclpy.qos import (QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy,
+                           QoSDurabilityPolicy)
+    from sensor_msgs.msg import CompressedImage, JointState
+    from std_msgs.msg import String
+    import numpy as np
+    try:
+        from vision.console_render import ConsoleState, render
+        from vision.link_metrics import parse_frame_id, RollingStats
+    except ImportError:
+        from console_render import ConsoleState, render
+        from link_metrics import parse_frame_id, RollingStats
+    HAVE_FEED = True
+except ImportError:
+    HAVE_FEED = False
+
 REMOTE_USER = "ubuntu"
 REMOTE_WS = "~/proyecto-4-grupo-3"
 ROS_DOMAIN_ID = "42"
 POLL_S = 3.0
+WHEEL_MAX_RAD_S = 15.0   # fondo de escala de la barra de velocidad (±)
 # Logs de los nodos locales. Si el panel se abre con doble clic, su stdout es
 # un pipe sin lector y un nodo que escriba ahí muere por SIGPIPE (código 120).
 LOCAL_LOG_DIR = os.path.expanduser("~/.rover_panel")
@@ -86,7 +112,7 @@ REMOTE_NODES = {
 # nombre -> (título, comando local). El mando DualSense se lee en el PC y
 # rc_control publica /motor_cmd hacia la Pi por la red (ROS_STATIC_PEERS).
 LOCAL_NODES = {
-    "visor": ("Visor de video (base.launch)", None),   # comando según Pi/fuente
+    "visor": ("Video + ruedas (en el panel)", None),   # embebido, sin proceso
     "joy": ("Mando: joy_node", ["ros2", "run", "joy", "joy_node"]),
     "rc": ("Mando: rc_control", ["ros2", "run", "locomotion", "rc_control"]),
 }
@@ -148,11 +174,112 @@ done; true
 """
 
 
+WHEEL_ORDER = ("front_left", "mid_left", "rear_left",
+               "front_right", "mid_right", "rear_right")
+WHEEL_TITLES = {"front_left": "Izq. delantera", "mid_left": "Izq. media",
+                "rear_left": "Izq. trasera", "front_right": "Der. delantera",
+                "mid_right": "Der. media", "rear_right": "Der. trasera"}
+WHEEL_STALE_S = 1.0     # sin /wheel_states por más de esto = dato viejo
+
+
+if HAVE_FEED:
+    class RosFeed:
+        """Nodo ROS dentro del panel: video, estado del enlace y /wheel_states.
+
+        Corre en su propio hilo; Tk solo lee los atributos (asignaciones
+        simples, seguras con el GIL).
+        """
+
+        def __init__(self, topic, host):
+            if host:   # sin multicast, ROS necesita saber dónde está la Pi
+                os.environ["ROS_STATIC_PEERS"] = host
+            os.environ["ROS_DOMAIN_ID"] = ROS_DOMAIN_ID
+            self.topic = topic
+            self.link_topic = topic.rsplit("/image", 1)[0] + "/link"
+            self.stats = RollingStats(3.0)
+            self.state = ConsoleState(topic=topic)
+            self.frame = None
+            self.last_rx = None
+            self.link_rx = None
+            self.wheels = {}            # nombre -> (posición rad, velocidad rad/s)
+            self.wheels_rx = None
+            self.own_init = not rclpy.ok()
+            if self.own_init:
+                rclpy.init()
+            self.node = Node("rover_panel_feed")
+            qos = QoSProfile(reliability=QoSReliabilityPolicy.BEST_EFFORT,
+                             durability=QoSDurabilityPolicy.VOLATILE,
+                             history=QoSHistoryPolicy.KEEP_LAST, depth=1)
+            self.node.create_subscription(CompressedImage, topic, self._on_image, qos)
+            self.node.create_subscription(String, self.link_topic, self._on_link, 1)
+            self.node.create_subscription(JointState, "/wheel_states", self._on_wheels, 10)
+            self.executor = SingleThreadedExecutor()
+            self.executor.add_node(self.node)
+            self.thread = threading.Thread(target=self.executor.spin, daemon=True)
+            self.thread.start()
+
+        def _on_image(self, msg):
+            now = time.monotonic_ns()
+            img = cv2.imdecode(np.frombuffer(msg.data, np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                return
+            _, seq = parse_frame_id(msg.header.frame_id)
+            self.stats.add(now, 0.0, len(msg.data), seq)
+            self.frame = img
+            self.last_rx = now
+
+        def _on_link(self, msg):
+            try:
+                self.state.link = json.loads(msg.data)
+                self.link_rx = time.monotonic_ns()
+                fps = self.state.link.get("fps")
+                if fps:
+                    self.state.expected_fps = float(fps)
+            except Exception:
+                pass
+
+        def _on_wheels(self, msg):
+            n = min(len(msg.name), len(msg.position), len(msg.velocity))
+            self.wheels = {msg.name[i]: (msg.position[i], msg.velocity[i])
+                           for i in range(n)}
+            self.wheels_rx = time.monotonic()
+
+        def wheels_age(self):
+            return None if self.wheels_rx is None else time.monotonic() - self.wheels_rx
+
+        def image(self, w, h, hud):
+            """Cuadro listo para mostrar (BGR, w x h) con el HUD de estado."""
+            now = time.monotonic_ns()
+            st = self.state
+            self.stats.prune(now)
+            s = self.stats.summary()
+            st.show_hud = hud
+            st.frame_age_s = None if self.last_rx is None else (now - self.last_rx) / 1e9
+            st.link_age_s = None if self.link_rx is None else (now - self.link_rx) / 1e9
+            if st.link_age_s is not None and st.link_age_s > 3.0:
+                st.link = {}
+            if s.get("n", 0) > 1:
+                st.fps, st.loss_pct = s["fps_rx"], s["loss_pct"]
+                st.mbps, st.kb_per_frame = s["kbps"] / 1000.0, s["avg_kb"]
+            else:
+                st.fps = st.loss_pct = st.mbps = st.kb_per_frame = None
+            return render(self.frame, st, w, h)
+
+        def close(self):
+            try:
+                self.executor.shutdown()
+                self.node.destroy_node()
+                if self.own_init and rclpy.ok():
+                    rclpy.shutdown()
+            except Exception:
+                pass
+
+
 class Panel(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Panel del rover")
-        self.minsize(560, 420)
+        self.minsize(1000, 600)
         self.host = tk.StringVar()
         self.source = tk.StringVar(value="csi:0")
         self.remote_state = {}      # nombre -> bool
@@ -162,9 +289,12 @@ class Panel(tk.Tk):
         self.busy = set()
         self.pkg_vars = {}
         self.building = False
+        self.feed = None
+        self.photo = None
         self._build()
         self.after(100, self.find)
         self.after(500, self._tick)
+        self.after(100, self._draw)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
     # ---- interfaz -----------------------------------------------------
@@ -177,7 +307,15 @@ class Panel(tk.Tk):
         self.link = ttk.Label(top, text="● sin conexión", foreground="#b00020")
         self.link.pack(side="left", padx=10)
 
-        box = ttk.LabelFrame(self, text="En la Raspberry", padding=8)
+        main = ttk.Frame(self)
+        main.pack(fill="both", expand=True)
+        left = ttk.Frame(main)
+        left.pack(side="left", fill="y")
+        right = ttk.Frame(main)
+        right.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        self._build_view(right)
+
+        box = ttk.LabelFrame(left, text="En la Raspberry", padding=8)
         box.pack(fill="x", padx=8, pady=4)
         self.rows = {}
         for name, (title, _cmd) in REMOTE_NODES.items():
@@ -198,7 +336,7 @@ class Panel(tk.Tk):
         ttk.Combobox(s, textvariable=self.source, width=8,
                      values=["csi:0", "usb:0"]).pack(side="left", padx=4)
 
-        loc = ttk.LabelFrame(self, text="En este PC", padding=8)
+        loc = ttk.LabelFrame(left, text="En este PC", padding=8)
         loc.pack(fill="x", padx=8, pady=4)
         self.lrows = {}
         for name, (title, _cmd) in LOCAL_NODES.items():
@@ -216,10 +354,10 @@ class Panel(tk.Tk):
                                  fg="white", bg="#888", pady=4)
         self.mode_lbl.pack(fill="x", pady=(6, 0))
 
-        ttk.Button(self, text="Detener todos los nodos",
+        ttk.Button(left, text="Detener todos los nodos",
                    command=self.stop_all).pack(fill="x", padx=8, pady=4)
 
-        bld = ttk.LabelFrame(self, text="Compilar (colcon build)", padding=8)
+        bld = ttk.LabelFrame(left, text="Compilar (colcon build)", padding=8)
         bld.pack(fill="x", padx=8, pady=4)
         pk = ttk.Frame(bld)
         pk.pack(fill="x")
@@ -237,8 +375,111 @@ class Panel(tk.Tk):
                                    command=lambda: self.build("pi"))
         self.build_pi.pack(side="left", padx=2)
 
-        self.out = tk.Text(self, height=10, state="disabled", wrap="word")
+        self.out = tk.Text(left, height=10, width=64, state="disabled", wrap="word")
         self.out.pack(fill="both", expand=True, padx=8, pady=8)
+
+    # ---- video y ruedas dentro del panel ----------------------------------
+    def _build_view(self, parent):
+        self.video = tk.Label(parent, bg="black", fg="#aaa", text=(
+            "Sin video. Inicia «Video + ruedas» en «En este PC»."
+            if HAVE_FEED else
+            "Video no disponible: faltan ROS 2 / OpenCV.\n"
+            "Abre el panel con ./lanzar_panel.sh"),
+            width=60, height=18)
+        self.video.pack(fill="both", expand=True, pady=(0, 6))
+        opts = ttk.Frame(parent)
+        opts.pack(fill="x")
+        self.hud = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opts, text="Datos sobre el video",
+                        variable=self.hud).pack(side="left")
+
+        wf = ttk.LabelFrame(parent, text="Ruedas (/wheel_states)", padding=6)
+        wf.pack(fill="x", pady=(6, 0))
+        for c, t in enumerate(("Rueda", "Ángulo (°)", "Vueltas", "Vel. (rad/s)", "")):
+            ttk.Label(wf, text=t, font=("TkDefaultFont", 9, "bold")).grid(
+                row=0, column=c, sticky="w", padx=6)
+        self.wlab = {}
+        for r, name in enumerate(WHEEL_ORDER, start=1):
+            ttk.Label(wf, text=WHEEL_TITLES[name]).grid(row=r, column=0, sticky="w", padx=6)
+            labs = []
+            for c in (1, 2, 3):
+                lb = ttk.Label(wf, text="—", width=10, anchor="e",
+                               font=("TkFixedFont", 10))
+                lb.grid(row=r, column=c, padx=6)
+                labs.append(lb)
+            bar = ttk.Progressbar(wf, length=120, maximum=2 * WHEEL_MAX_RAD_S, value=WHEEL_MAX_RAD_S)
+            bar.grid(row=r, column=4, padx=6, pady=1)
+            self.wlab[name] = (labs, bar)
+        wf.columnconfigure(4, weight=1)
+        self.wstatus = ttk.Label(wf, text="Sin datos: ¿corren tool_command y encoder_node "
+                                          "(con counts_per_rev)?", foreground="#888")
+        self.wstatus.grid(row=7, column=0, columnspan=5, sticky="w", padx=6, pady=(4, 0))
+
+    def _feed_topic(self):
+        return f"/{self.source.get().replace(':', '')}/image/compressed"
+
+    def _start_feed(self):
+        if not HAVE_FEED:
+            self.say("Falta ROS 2 / OpenCV: abre el panel con ./lanzar_panel.sh")
+            return False
+        host = self.host.get().strip()
+        if not host:
+            self.say("Aviso: sin IP de la Pi, puede que no llegue el video (usa Buscar).")
+        try:
+            self.feed = RosFeed(self._feed_topic(), host)
+        except Exception as e:  # rclpy sin workspace cargado, etc.
+            self.feed = None
+            self.say(f"No pude iniciar el video: {e}")
+            return False
+        self.say(f"Video escuchando {self.feed.topic}.")
+        return True
+
+    def _stop_feed(self):
+        f, self.feed = self.feed, None
+        if f:
+            f.close()
+        self.photo = None
+        self.video.configure(image="", text="Sin video. Inicia «Video + ruedas» en «En este PC».")
+        self._show_wheels({}, None)
+
+    def _draw(self):
+        f = self.feed
+        if f is not None:
+            w, h = self.video.winfo_width(), self.video.winfo_height()
+            if w > 64 and h > 36:
+                try:
+                    ok, ppm = cv2.imencode(".ppm", f.image(w, h, self.hud.get()))
+                    if ok:
+                        self.photo = tk.PhotoImage(data=ppm.tobytes(), format="PPM")
+                        self.video.configure(image=self.photo, text="")
+                except Exception as e:
+                    self.say(f"Error dibujando video: {e}")
+                    self._stop_feed()
+            self._show_wheels(f.wheels, f.wheels_age())
+        self.after(40, self._draw)
+
+    def _show_wheels(self, wheels, age):
+        fresh = bool(wheels) and age is not None and age < WHEEL_STALE_S
+        for name, (labs, bar) in self.wlab.items():
+            if not fresh or name not in wheels:
+                for lb in labs:
+                    lb.configure(text="—")
+                bar.configure(value=WHEEL_MAX_RAD_S)
+                continue
+            pos, vel = wheels[name]
+            turns = pos / (2 * math.pi)
+            labs[0].configure(text=f"{math.degrees(pos) % 360:6.1f}")
+            labs[1].configure(text=f"{turns:+.2f}")
+            labs[2].configure(text=f"{vel:+.2f}")
+            bar.configure(value=max(0.0, min(2 * WHEEL_MAX_RAD_S, vel + WHEEL_MAX_RAD_S)))
+        if fresh:
+            self.wstatus.configure(text="Recibiendo datos de ruedas.", foreground="#1b7f3b")
+        elif age is not None:
+            self.wstatus.configure(text=f"Datos de ruedas viejos ({age:.0f} s).",
+                                   foreground="#b00020")
+        else:
+            self.wstatus.configure(text="Sin datos: ¿corren tool_command y encoder_node "
+                                        "(con counts_per_rev)?", foreground="#888")
 
     def _packages(self):
         src = os.path.join(LOCAL_WS, "src")
@@ -249,6 +490,8 @@ class Panel(tk.Tk):
 
     # ---- detener todo / compilar --------------------------------------
     def stop_all(self):
+        if self.feed:
+            self._stop_feed()
         for name in list(self.local_procs):
             self.toggle_local(name)
         for name, on in list(self.remote_state.items()):
@@ -383,6 +626,11 @@ class Panel(tk.Tk):
         if self.host.get().strip() and not self.busy:
             self._poll()
         for name, (dot, btn) in self.lrows.items():
+            if name == "visor":
+                on = self.feed is not None
+                dot.configure(foreground="#1b7f3b" if on else "#888")
+                btn.configure(text="Detener" if on else "Iniciar")
+                continue
             p = self.local_procs.get(name)
             if p and p.poll() is not None:
                 self.say(f"{name} terminó (código {p.returncode}).\n"
@@ -396,6 +644,13 @@ class Panel(tk.Tk):
 
     # ---- nodo local ---------------------------------------------------
     def toggle_local(self, name):
+        if name == "visor":
+            if self.feed:
+                self._stop_feed()
+                self.say("Video detenido.")
+            else:
+                self._start_feed()
+            return
         p = self.local_procs.get(name)
         if p:
             os.killpg(p.pid, signal.SIGINT)
@@ -406,14 +661,11 @@ class Panel(tk.Tk):
             return
         host = self.host.get().strip()
         cmd = LOCAL_NODES[name][1]
-        if cmd is None:   # visor
-            cmd = ["ros2", "launch", "vision", "base.launch.py",
-                   f"rover:={host or 'auto'}", f"source:={self.source.get()}"]
         env = {k: v for k, v in os.environ.items() if k not in SNAP_ENV_VARS}
         env["ROS_DOMAIN_ID"] = ROS_DOMAIN_ID
         if host:   # sin multicast, ROS necesita saber dónde está la Pi
             env["ROS_STATIC_PEERS"] = host
-        elif name != "visor":
+        else:
             self.say("Aviso: sin IP de la Pi, /motor_cmd puede no llegar (usa Buscar).")
         try:
             os.makedirs(LOCAL_LOG_DIR, exist_ok=True)
@@ -472,6 +724,7 @@ class Panel(tk.Tk):
 
     def _close(self):
         self._stop_mode_watch()
+        self._stop_feed()
         for p in self.local_procs.values():
             try:
                 os.killpg(p.pid, signal.SIGINT)

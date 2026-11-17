@@ -114,6 +114,7 @@ ros2 topic echo /wheel_states
 
 - **`camera_node`**: captura frames con OpenCV y los publica como `sensor_msgs/CompressedImage` (JPEG). Parámetros: `video_device`, `frame_rate`, `width`, `height`, `topic`, `frame_id`. QoS `BEST_EFFORT`/`VOLATILE`/`KEEP_LAST(1)` para minimizar latencia de streaming en vivo.
 - **`image_viewer_node`**: se suscribe a un tópico `CompressedImage` y muestra el video en una ventana OpenCV, sin depender de `rqt`. Fuerza el backend Qt `xcb` para evitar problemas de tamaño de ventana bajo Wayland/GNOME.
+- **`rover_panel`** (`./lanzar_panel.sh` en el PC): panel gráfico (Tk) para abrir/cerrar los nodos de la Pi por SSH. El video de la cámara y los datos de las ruedas van **dentro del mismo panel** (sin ventana emergente): el botón «Video + ruedas» suscribe el panel al video, al estado del enlace y a `/wheel_states` (ángulo, vueltas y velocidad de cada rueda). Para ver las ruedas deben estar corriendo `tool_command` y `encoder_node` con `counts_per_rev`. Requiere `python3-tk`, `python3-opencv` y ROS 2 cargado; sin ellos el panel abre pero sin video. `image_viewer_node` sigue disponible como visor aparte.
 - **`cameras.launch.py`**: lanza una instancia de `camera_node` por cada índice de `/dev/video*` indicado.
 
 ### Uso
