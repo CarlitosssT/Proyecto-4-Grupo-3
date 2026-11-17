@@ -53,16 +53,16 @@ const int PIN_DIR  = 27;
 // "invert" del nodo encoder_node.
 const int NUM_ENCODERS = 6;
 const int PIN_ENC[NUM_ENCODERS][2] = {
-  {32, 33},   // front_left
+  {23, 22},   // front_left
   {25, 26},   // mid_left
   {18, 4},    // rear_left
-  {23, 22},   // front_right
+  {14, 15},   // front_right (15 es pin de arranque: si falla la carga del firmware, desconectar ese cable)
   {21, 19},   // mid_right
-  {14, 15},   // rear_right (15 es pin de arranque: si falla la carga del firmware, desconectar ese cable)
+  {32, 33},   // rear_right
 };
 // Libres: 14 y, solo como entradas sin pull-up, 34, 35, 36 y 39.
 // No usar 0, 2, 5, 12 (arranque) ni 6-11 (memoria flash). 15 también es de arranque
-// y se usa en rear_right porque no quedaban otros: ver nota arriba.
+// y se usa en front_right porque no quedaban otros: ver nota arriba.
 // =================================================
 
 // ===================== STEPPER ===================
