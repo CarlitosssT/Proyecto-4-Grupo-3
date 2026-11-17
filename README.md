@@ -59,6 +59,30 @@ Canal 12 → señal del servo de la cámara. Canal 13 → señal del servo de la
 
 Los encoders se alimentan con **3.3 V** de la ESP (con 5 V sus salidas llegarían a 5 V y los pines de la ESP32 solo aguantan 3.3 V) y comparten GND con ella. Los 12 pines llevan pull-up interno. La ESP cuenta por hardware (PCNT), en cuadratura ×4.
 
+**Colores de los cables de los encoders** — los cables originales del motor/encoder se alargaron con extensiones, así que el color cambia a mitad del cable. Colores originales (lado del motor) por pin:
+
+| Pin | Color original |
+|---|---|
+| M2 | Rojo |
+| M1 | Blanco |
+| GND | Azul |
+| VCC | Negro |
+| C1 | Verde |
+| C2 | Amarillo |
+
+Color de la **extensión** (lado de la ESP32/electrónica) para cada rueda. Los de dos colores se escriben como `A + B` (un solo cable bicolor):
+
+| Pin (original) | Izq. trasera | Izq. media | Izq. delantera | Der. trasera | Der. media | Der. delantera |
+|---|---|---|---|---|---|---|
+| M2 (rojo) | Rojo | Rojo | Rojo | Rojo | Rojo | Rojo |
+| M1 (blanco) | Amarillo + Blanco | Amarillo + Naranja | Amarillo | Naranja | Amarillo | Naranja |
+| GND (azul) | Azul | Azul | Azul | Azul | Azul | Azul |
+| VCC (negro) | Café | Café | Café | Café | Café | Café |
+| C1 (verde) | Verde | Verde | Verde | Verde | Verde | Verde |
+| C2 (amarillo) | Blanco | Blanco | Blanco | Blanco | Blanco | Blanco |
+
+Solo cambia la extensión de **M1**; el resto es igual en las 6 ruedas. Ojo: C2 (amarillo original) sale blanco en la extensión, y M1 (blanco original) sale amarillo, naranja o bicolor según la rueda.
+
 STBY de los 3 puentes → 5 V fijo. PWMA y PWMB de cada puente van fijos a 3.3 V (el PWM se aplica sobre los AIN/BIN). VCC de los TB6612 → 3.3 V, VM → batería de motores (máx. 13.5 V).
 
 Conexión PCA9685 ↔ Raspberry Pi: VCC → 3.3 V (pin 1), GND → GND (pin 6), SDA → GPIO 2 (pin 3), SCL → GPIO 3 (pin 5). OE a GND o sin conectar; V+ → fuente de 5–6 V para los servos de la cámara y de la pala (no los 3.3 V de la Pi: un servo puede pedir >1 A y reiniciarla, y el de la pala trabaja cargado: la fuente debe aguantar los dos a la vez). Habilitar I2C (`raspi-config` → Interface → I2C) y comprobar con `i2cdetect -y 1` (debe aparecer `40`). Las GND de la Pi, el PCA, los puentes H y la batería deben estar unidas.
