@@ -52,8 +52,8 @@ try:
     from rclpy.executors import SingleThreadedExecutor
     from rclpy.qos import (QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy,
                            QoSDurabilityPolicy)
-    from sensor_msgs.msg import CompressedImage, JointState
-    from std_msgs.msg import String
+    from sensor_msgs.msg import CompressedImage, JointState, Joy
+    from std_msgs.msg import Bool, String
     import numpy as np
     try:
         from vision.console_render import ConsoleState, render
@@ -203,6 +203,10 @@ if HAVE_FEED:
             self.link_rx = None
             self.wheels = {}            # nombre -> (posición rad, velocidad rad/s)
             self.wheels_rx = None
+            self.joy_rx = None
+            self.joy_axes = self.joy_nbtn = 0
+            self.joy_pressed = []
+            self.armed = None            # None = aún no llega /armed
             self.own_init = not rclpy.ok()
             if self.own_init:
                 rclpy.init()
@@ -213,6 +217,11 @@ if HAVE_FEED:
             self.node.create_subscription(CompressedImage, topic, self._on_image, qos)
             self.node.create_subscription(String, self.link_topic, self._on_link, 1)
             self.node.create_subscription(JointState, "/wheel_states", self._on_wheels, 10)
+            self.node.create_subscription(Joy, "/joy", self._on_joy, 10)
+            latched = QoSProfile(reliability=QoSReliabilityPolicy.RELIABLE,
+                                 durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                                 history=QoSHistoryPolicy.KEEP_LAST, depth=1)
+            self.node.create_subscription(Bool, "/armed", self._on_armed, latched)
             self.executor = SingleThreadedExecutor()
             self.executor.add_node(self.node)
             self.thread = threading.Thread(target=self.executor.spin, daemon=True)
@@ -243,6 +252,17 @@ if HAVE_FEED:
             self.wheels = {msg.name[i]: (msg.position[i], msg.velocity[i])
                            for i in range(n)}
             self.wheels_rx = time.monotonic()
+
+        def _on_joy(self, msg):
+            self.joy_rx = time.monotonic()
+            self.joy_axes, self.joy_nbtn = len(msg.axes), len(msg.buttons)
+            self.joy_pressed = [i for i, b in enumerate(msg.buttons) if b]
+
+        def _on_armed(self, msg):
+            self.armed = bool(msg.data)
+
+        def joy_age(self):
+            return None if self.joy_rx is None else time.monotonic() - self.joy_rx
 
         def wheels_age(self):
             return None if self.wheels_rx is None else time.monotonic() - self.wheels_rx
@@ -279,7 +299,9 @@ class Panel(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Panel del rover")
-        self.minsize(1000, 600)
+        self.minsize(900, 560)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{int(sw * 0.92)}x{int(sh * 0.88)}+10+10")
         self.host = tk.StringVar()
         self.source = tk.StringVar(value="csi:0")
         self.remote_state = {}      # nombre -> bool
@@ -323,7 +345,7 @@ class Panel(tk.Tk):
             r.pack(fill="x", pady=2)
             dot = ttk.Label(r, text="●", foreground="#888", width=2)
             dot.pack(side="left")
-            ttk.Label(r, text=title, width=34).pack(side="left")
+            ttk.Label(r, text=title, width=30).pack(side="left")
             b = ttk.Button(r, text="Iniciar", width=9,
                            command=lambda n=name: self.toggle(n))
             b.pack(side="left", padx=2)
@@ -344,7 +366,7 @@ class Panel(tk.Tk):
             r.pack(fill="x", pady=2)
             dot = ttk.Label(r, text="●", foreground="#888", width=2)
             dot.pack(side="left")
-            ttk.Label(r, text=title, width=34).pack(side="left")
+            ttk.Label(r, text=title, width=30).pack(side="left")
             b = ttk.Button(r, text="Iniciar", width=9,
                            command=lambda n=name: self.toggle_local(n))
             b.pack(side="left", padx=2)
@@ -375,7 +397,7 @@ class Panel(tk.Tk):
                                    command=lambda: self.build("pi"))
         self.build_pi.pack(side="left", padx=2)
 
-        self.out = tk.Text(left, height=10, width=64, state="disabled", wrap="word")
+        self.out = tk.Text(left, height=8, width=46, state="disabled", wrap="word")
         self.out.pack(fill="both", expand=True, padx=8, pady=8)
 
     # ---- video y ruedas dentro del panel ----------------------------------
@@ -385,13 +407,17 @@ class Panel(tk.Tk):
             if HAVE_FEED else
             "Video no disponible: faltan ROS 2 / OpenCV.\n"
             "Abre el panel con ./lanzar_panel.sh"),
-            width=60, height=18)
+            width=1, height=1)
         self.video.pack(fill="both", expand=True, pady=(0, 6))
         opts = ttk.Frame(parent)
         opts.pack(fill="x")
         self.hud = tk.BooleanVar(value=True)
         ttk.Checkbutton(opts, text="Datos sobre el video",
                         variable=self.hud).pack(side="left")
+
+        self.ctl = tk.Label(parent, text="Mando: —", anchor="w", fg="white",
+                            bg="#888", font=("TkDefaultFont", 11, "bold"), padx=8, pady=3)
+        self.ctl.pack(fill="x", pady=(6, 0))
 
         wf = ttk.LabelFrame(parent, text="Ruedas (/wheel_states)", padding=6)
         wf.pack(fill="x", pady=(6, 0))
@@ -439,6 +465,7 @@ class Panel(tk.Tk):
         if f:
             f.close()
         self.photo = None
+        self.ctl.configure(text="Mando: —", bg="#888")
         self.video.configure(image="", text="Sin video. Inicia «Video + ruedas» en «En este PC».")
         self._show_wheels({}, None)
 
@@ -456,7 +483,20 @@ class Panel(tk.Tk):
                     self.say(f"Error dibujando video: {e}")
                     self._stop_feed()
             self._show_wheels(f.wheels, f.wheels_age())
+            self._show_ctl(f)
         self.after(40, self._draw)
+
+    def _show_ctl(self, f):
+        age = f.joy_age()
+        if age is None or age > 1.0:
+            text, color = "SIN /joy: joy_node no ve el mando (o no llega a este panel)", "#b00020"
+        else:
+            btn = ",".join(map(str, f.joy_pressed)) or "ninguno"
+            arm = {True: "ARMADO", False: "DESARMADO", None: "sin /armed (¿rc_control?)"}[f.armed]
+            text = (f"/joy ok ({f.joy_axes} ejes, {f.joy_nbtn} botones)  |  "
+                    f"botones pulsados: {btn}  (Options=9, Create=8)  |  {arm}")
+            color = "#1b7f3b" if f.armed else "#e65100"
+        self.ctl.configure(text=text, bg=color)
 
     def _show_wheels(self, wheels, age):
         fresh = bool(wheels) and age is not None and age < WHEEL_STALE_S
@@ -651,6 +691,8 @@ class Panel(tk.Tk):
             else:
                 self._start_feed()
             return
+        if name == "rc" and not self.feed:
+            self._start_feed()    # para ver /joy y /armed en el panel
         p = self.local_procs.get(name)
         if p:
             os.killpg(p.pid, signal.SIGINT)
