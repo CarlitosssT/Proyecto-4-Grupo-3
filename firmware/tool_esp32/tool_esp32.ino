@@ -53,10 +53,10 @@ const int PIN_DIR  = 27;
 // "invert" del nodo encoder_node.
 const int NUM_ENCODERS = 6;
 const int PIN_ENC[NUM_ENCODERS][2] = {
-  {32, 33},   // front_left
+  {23, 22},   // front_left
   {25, 26},   // mid_left
   {18, 4},    // rear_left
-  {23, 22},   // front_right
+  {32, 33},   // front_right
   {21, 19},   // mid_right
   {14, 15},   // rear_right (15 es pin de arranque: si falla la carga del firmware, desconectar ese cable)
 };
