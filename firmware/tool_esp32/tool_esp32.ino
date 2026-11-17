@@ -43,8 +43,8 @@
 #include <ESP32Encoder.h>
 
 // ===================== PINES =====================
-const int PIN_STEP = 18;
-const int PIN_DIR  = 4;
+const int PIN_STEP = 13;
+const int PIN_DIR  = 27;
 // EN del A4988 sin conectar: el módulo lo deja activo por defecto
 
 // {canal A, canal B}. El orden de las filas es el orden del reporte.
@@ -55,7 +55,7 @@ const int NUM_ENCODERS = 6;
 const int PIN_ENC[NUM_ENCODERS][2] = {
   {32, 33},   // front_left
   {25, 26},   // mid_left
-  {27, 13},   // rear_left
+  {18, 4},    // rear_left
   {23, 22},   // front_right
   {21, 19},   // mid_right
   {17, 16},   // rear_right

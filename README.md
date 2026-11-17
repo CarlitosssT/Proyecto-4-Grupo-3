@@ -49,10 +49,10 @@ Canal 12 → señal del servo de la cámara. Canal 13 → señal del servo de la
 
 | Señal | GPIO |
 |---|---|
-| Stepper STEP, DIR | 18, 4 |
+| Stepper STEP, DIR | 13, 27 |
 | Encoder front_left (A, B) | 32, 33 |
 | Encoder mid_left (A, B) | 25, 26 |
-| Encoder rear_left (A, B) | 27, 13 |
+| Encoder rear_left (A, B) | 18, 4 |
 | Encoder front_right (A, B) | 23, 22 |
 | Encoder mid_right (A, B) | 21, 19 |
 | Encoder rear_right (A, B) | 17, 16 |
