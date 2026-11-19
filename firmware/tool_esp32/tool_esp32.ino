@@ -66,8 +66,8 @@ const int PIN_ENC[NUM_ENCODERS][2] = {
 // =================================================
 
 // ===================== STEPPER ===================
-const float VELOCIDAD_MAX = 400;      // pasos por segundo
-const float ACELERACION   = 200;      // pasos por segundo²
+const float VELOCIDAD_MAX = 800;      // pasos por segundo
+const float ACELERACION   = 800;      // pasos por segundo²
 // =================================================
 
 // ===================== ENCODERS ==================

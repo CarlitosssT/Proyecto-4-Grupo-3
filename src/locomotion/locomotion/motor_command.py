@@ -143,8 +143,8 @@ class MotorCommand(Node):
         self.declare_parameter("cam_pulse_max_us", 2400)
         # Servo de la pala (antes en la ESP32): mismos límites, arranque y pulsos
         self.declare_parameter("shovel_channel", 13)
-        self.declare_parameter("shovel_min_deg", 5)
-        self.declare_parameter("shovel_max_deg", 130)
+        self.declare_parameter("shovel_min_deg", 0)
+        self.declare_parameter("shovel_max_deg", 180)
         self.declare_parameter("shovel_start_deg", 30)
         self.declare_parameter("shovel_pulse_min_us", 500)
         self.declare_parameter("shovel_pulse_max_us", 2400)
