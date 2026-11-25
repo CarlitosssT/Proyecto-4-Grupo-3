@@ -11,6 +11,7 @@ src/
 │   │   ├── motor_command.py     # Nodo del PCA9685 (I2C): 4 servos de rueda, 2 motores DC, servo de cámara y servo de pala
 │   │   ├── tool_command.py      # Puente serial a la ESP32 DevKit: stepper (/stepper_steps, /stepper_stop)
 │   │   ├── keyboard_control.py  # Teleoperación por teclado (w/a/s/d/espacio/q)
+│   │   ├── servo_calibrate.py   # Calibra el centro ("quieto") de los servos de rueda con el teclado
 │   │   └── rc_control.py        # Teleoperación con mando DualSense (requiere joy_node)
 │   ├── package.xml
 │   └── setup.py
@@ -80,22 +81,25 @@ ros2 run locomotion tool_command
 
 ### Calibrar los servos de rueda
 
-Cada servo de rotación continua tiene su propio punto muerto y su propia velocidad máxima. Además, el oscilador del PCA9685 no da exactamente 1500 µs. Si el centro de un servo está corrido, esa rueda se arrastra con el comando en 0. Como los derechos van invertidos, ese mismo error hace que un lado vaya más rápido que el otro. Con `motor_command` corriendo y las ruedas en el aire:
+Cada servo de rotación continua tiene su propio punto muerto, y el oscilador del PCA9685 no es exacto, así que un pulso de 1500 µs casi nunca deja los servos quietos. Si el centro está corrido, con los gatillos sueltos los izquierdos giran en un sentido y los derechos (invertidos) en el otro. Hay que calibrarlo una vez, con las ruedas en el aire y `motor_command` corriendo (desarmado sirve, porque igual manda el pulso de centro):
 
 ```bash
-# 1. Centro: armado y sin tocar el gatillo, ajustar el trim (µs) de cada rueda
-#    que se mueva hasta que quede quieta. Orden: front_right, mid_right, front_left, mid_left
-ros2 param set /motor_command servo_trim_us "[0, 0, 15, -10]"
-
-# 2. Saturación: si a medio gatillo los servos ya van a tope, bajar el span
-ros2 param set /motor_command servo_span_us 300
-
-# 3. Velocidad: con el gatillo a fondo, bajar la ganancia de los servos más rápidos
-#    hasta que todos giren igual (usar decimales: 1.0, no 1)
-ros2 param set /motor_command servo_gain "[1.0, 0.92, 1.0, 0.95]"
+ros2 run locomotion servo_calibrate
 ```
 
-Cuando queden bien, dejar los valores fijos en el `declare_parameter` de `motor_command.py` o pasarlos con `--ros-args -p ...`. Si algún servo trae un potenciómetro de ajuste del centro, también se puede centrar con él.
+- `0` selecciona los 4 servos (`servo_center_us`) y `1`–`4` uno solo (`servo_trim_us`; orden front_right, mid_right, front_left, mid_left).
+- `a`/`d` restan o suman 5 µs, `A`/`D` 25 µs, y `r` vuelve a 0. A 50 Hz el PCA tiene pasos de ~5 µs.
+- Si un izquierdo va hacia atrás, sube el valor (`d`); si va hacia adelante, bájalo (`a`). En los derechos es al revés.
+- Primero mueve el centro de todos hasta que la mayoría quede quieta; después corrige con el trim los que sigan moviéndose.
+
+`motor_command` guarda cada cambio de un `servo_*` en `~/.ros/servo_calibration.json` (parámetro `servo_cal_file`) y lo vuelve a cargar al arrancar; lo que se pase con `--ros-args -p` tiene prioridad. Lo mismo vale para `ros2 param set`:
+
+```bash
+# Si a medio gatillo los servos ya van a tope, bajar el span
+ros2 param set /motor_command servo_span_us 300
+# Con el gatillo a fondo, bajar la ganancia de los más rápidos (usar decimales: 1.0, no 1)
+ros2 param set /motor_command servo_gain "[1.0, 0.92, 1.0, 0.95]"
+```
 
 ## Paquete `vision`
 

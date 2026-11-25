@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import json
+import os
 import time
 
 import rclpy
@@ -45,8 +47,18 @@ HBRIDGE_MOTOR_CHANNELS = {
     "rear_right": (6, 7),    # BIN1, BIN2 (pines 3, 4 del puente)
 }
 
-SERVO_PARAMS = ("servo_invert", "servo_trim_us", "servo_gain",
-                "servo_center_us", "servo_span_us", "servo_deadband")
+# Valores por defecto de la calibración de los servos de rueda. Si existe el
+# archivo servo_cal_file (lo escribe motor_command cada vez que se cambia un
+# servo_* con `ros2 param set` o con servo_calibrate), sus valores mandan.
+SERVO_DEFAULTS = {
+    "servo_invert": [True, True, False, False],
+    "servo_trim_us": [0, 0, 0, 0],
+    "servo_gain": [1.0, 1.0, 1.0, 1.0],
+    "servo_center_us": 1500,
+    "servo_span_us": 500,
+    "servo_deadband": 0.02,
+}
+SERVO_PARAMS = tuple(SERVO_DEFAULTS)
 
 LEFT_MOTORS = ("front_left", "mid_left", "rear_left")
 RIGHT_MOTORS = ("front_right", "mid_right", "rear_right")
@@ -198,24 +210,24 @@ class MotorCommand(Node):
         # Seguridad: sin /armed=True (rc_control) o sin /motor_cmd reciente, frena
         self.declare_parameter("require_arm", True)
         self.declare_parameter("cmd_timeout", 0.5)    # s; <= 0 lo desactiva
-        # Servos de rueda (front/mid), en el orden de SERVO_MOTORS:
-        # front_right, mid_right, front_left, mid_left.
-        # Los derechos van espejados respecto a los izquierdos, por eso
-        # arrancan invertidos. ¡Verificar con las ruedas en el aire!
-        self.declare_parameter("servo_invert", [True, True, False, False])
-        # Calibración (se puede cambiar en caliente con `ros2 param set`):
-        # servo_trim_us: corrección del punto muerto de cada servo (us). Subir
-        #   o bajar hasta que la rueda quede quieta con el comando en 0.
+        # Servos de rueda (front/mid). Las listas van en el orden de
+        # SERVO_MOTORS: front_right, mid_right, front_left, mid_left.
+        # servo_invert: los derechos van espejados, por eso arrancan invertidos.
+        # servo_center_us: pulso de "quieto" para los 4. El oscilador del PCA
+        #   no es exacto, así que casi nunca es 1500 de verdad: calibrar con
+        #   `ros2 run locomotion servo_calibrate`.
+        # servo_trim_us: corrección del centro de cada servo (us), sumada a la anterior.
         # servo_gain: escala de velocidad de cada servo (1.0 = span completo).
         #   Bajar la del servo más rápido hasta que todos giren igual.
         # servo_span_us: distancia al centro (us) a la que el servo llega a su
-        #   velocidad máxima. Muchos servos saturan antes de 500 us: si con
-        #   medio gatillo ya van a tope, bajarlo (p. ej. 200-300).
-        self.declare_parameter("servo_trim_us", [0, 0, 0, 0])
-        self.declare_parameter("servo_gain", [1.0, 1.0, 1.0, 1.0])
-        self.declare_parameter("servo_center_us", 1500)
-        self.declare_parameter("servo_span_us", 500)
-        self.declare_parameter("servo_deadband", 0.02) # |cmd| menor: pulso de centro
+        #   velocidad máxima. Si con medio gatillo ya van a tope, bajarlo.
+        # servo_deadband: con |comando| menor manda el pulso de centro.
+        # Todos se pueden cambiar en caliente y se guardan en servo_cal_file.
+        self.declare_parameter("servo_cal_file", "~/.ros/servo_calibration.json")
+        self.cal_file_ = os.path.expanduser(self.get_parameter("servo_cal_file").value)
+        saved = self.load_servo_cal()
+        for name, default in SERVO_DEFAULTS.items():
+            self.declare_parameter(name, saved.get(name, default))
         self.declare_parameter("cam_channel", 9)
         self.declare_parameter("cam_min_deg", 20)     # ¡ajustar al montaje real!
         self.declare_parameter("cam_max_deg", 160)
@@ -349,6 +361,49 @@ class MotorCommand(Node):
             for i, name in enumerate(SERVO_MOTORS)
         }
 
+    def load_servo_cal(self):
+        """Lee la calibración guardada, con los mismos tipos que SERVO_DEFAULTS
+        (si no, ROS fijaría otro tipo al parámetro y rechazaría los cambios)."""
+        try:
+            with open(self.cal_file_) as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as e:
+            self.get_logger().warn(f"No pude leer {self.cal_file_} ({e}); uso los valores por defecto")
+            return {}
+        saved = {}
+        for name, default in SERVO_DEFAULTS.items():
+            if name not in data:
+                continue
+            try:
+                if isinstance(default, list):
+                    cast = type(default[0])
+                    value = [cast(v) for v in data[name]]
+                    if len(value) != len(default):
+                        raise ValueError("largo distinto")
+                else:
+                    value = type(default)(data[name])
+            except (TypeError, ValueError):
+                self.get_logger().warn(f"{name} inválido en {self.cal_file_}; se ignora")
+                continue
+            saved[name] = value
+        if saved:
+            self.get_logger().info(f"Calibración de servos cargada de {self.cal_file_}")
+        return saved
+
+    def save_servo_cal(self, values):
+        data = {k: (v if isinstance(v, (bool, int, float, str)) else list(v))
+                for k, v in values.items()}
+        try:
+            os.makedirs(os.path.dirname(self.cal_file_) or ".", exist_ok=True)
+            tmp = self.cal_file_ + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, self.cal_file_)
+        except OSError as e:
+            self.get_logger().warn(f"No pude guardar la calibración en {self.cal_file_}: {e}")
+
     def on_servo_params(self, params):
         changed = {p.name: p.value for p in params if p.name in SERVO_PARAMS}
         if not changed:
@@ -364,6 +419,7 @@ class MotorCommand(Node):
         for name in SERVO_MOTORS:
             self.motors_[name].configure(**cfg[name])
         self.log_servo_config(cfg)
+        self.save_servo_cal(values)
         return SetParametersResult(successful=True)
 
     def log_servo_config(self, cfg):
@@ -454,7 +510,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():   # Ctrl+C ya cierra el contexto en Jazzy
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

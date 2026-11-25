@@ -24,6 +24,7 @@ setup(
             'rc_control=locomotion.rc_control:main',
             'keyboard_control=locomotion.keyboard_control:main',
             'tool_command=locomotion.tool_command:main',
+            'servo_calibrate=locomotion.servo_calibrate:main',
         ],
     },
 )
