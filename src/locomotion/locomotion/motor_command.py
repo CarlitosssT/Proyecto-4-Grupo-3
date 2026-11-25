@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
+import time
+
 import rclpy
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from rclpy.qos import DurabilityPolicy, QoSProfile
@@ -23,7 +26,8 @@ from locomotion.pca9685 import PCA9685
 # Canal 8: servo de la pala de excavación (parámetro shovel_channel).
 # Canal 9: servo de inclinación de la cámara (parámetro cam_channel).
 # Canales 10..15 libres.
-# Si un servo de rueda gira al revés: parámetro servo_invert.
+# Si un servo de rueda gira al revés: parámetro servo_invert. Para que todos
+# queden quietos en 0 y giren igual: servo_trim_us y servo_gain (ver abajo).
 # Si un motor trasero gira al revés: intercambia sus dos canales aquí (o sus cables).
 # ¡AJUSTAR según el cableado real antes de energizar!
 # =========================
@@ -33,13 +37,16 @@ SERVO_MOTOR_CHANNELS = {
     "front_left":  2,
     "mid_left":    3,
 }
-# Mismo orden que SERVO_MOTOR_CHANNELS para los parámetros servo_invert/servo_trim_us
+# Mismo orden que SERVO_MOTOR_CHANNELS para servo_invert/servo_trim_us/servo_gain
 SERVO_MOTORS = tuple(SERVO_MOTOR_CHANNELS)
 
 HBRIDGE_MOTOR_CHANNELS = {
     "rear_left":  (4, 5),    # AIN1, AIN2 (pines 1, 2 del puente)
     "rear_right": (6, 7),    # BIN1, BIN2 (pines 3, 4 del puente)
 }
+
+SERVO_PARAMS = ("servo_invert", "servo_trim_us", "servo_gain",
+                "servo_center_us", "servo_span_us", "servo_deadband")
 
 LEFT_MOTORS = ("front_left", "mid_left", "rear_left")
 RIGHT_MOTORS = ("front_right", "mid_right", "rear_right")
@@ -74,18 +81,35 @@ class PCAMotor:
 
 class PCAContinuousServo:
     """Servo de rotación continua (de velocidad) en un canal del PCA9685.
-    value en [-1, 1]: center_us + value * span_us. Con value ~0 no manda
-    pulsos (el servo queda quieto aunque su centro no esté bien calibrado)."""
+
+    value en [-1, 1] -> pulso = center_us + value * gain * span_us.
+    Con |value| < deadband manda el pulso de centro (quieto). Ojo: NO se
+    cortan los pulsos para frenar, porque muchos servos digitales se quedan
+    con el último pulso que recibieron y siguen girando sin señal.
+    """
 
     def __init__(self, pca, channel, center_us=1500, span_us=500,
-                 invert=False, deadband=0.02):
+                 invert=False, gain=1.0, deadband=0.02):
         self.pca_ = pca
         self.channel_ = channel
-        self.center_ = center_us
-        self.span_ = span_us
-        self.sign_ = -1.0 if invert else 1.0
-        self.deadband_ = deadband
         self.value_ = None  # fuerza la primera escritura
+        self.configure(center_us, span_us, invert, gain, deadband)
+
+    def configure(self, center_us, span_us, invert, gain, deadband):
+        """Cambia la calibración en caliente y reescribe el pulso actual."""
+        self.center_ = float(center_us)
+        self.span_ = float(span_us)
+        self.sign_ = -1.0 if invert else 1.0
+        self.gain_ = float(gain)
+        self.deadband_ = float(deadband)
+        if self.value_ is not None:
+            value, self.value_ = self.value_, None
+            self.value = value
+
+    def pulse_us(self, value):
+        if abs(value) < self.deadband_:
+            return self.center_
+        return self.center_ + self.sign_ * value * self.gain_ * self.span_
 
     @property
     def value(self):
@@ -96,15 +120,14 @@ class PCAContinuousServo:
         value = max(-1.0, min(1.0, value))
         if value == self.value_:
             return  # evita tráfico I2C innecesario
-        if abs(value) < self.deadband_:
-            self.pca_.set_duty(self.channel_, 0.0)
-        else:
-            self.pca_.set_pulse_us(
-                self.channel_, self.center_ + self.sign_ * value * self.span_)
+        self.pca_.set_pulse_us(self.channel_, self.pulse_us(value))
         self.value_ = value
 
     def stop(self):
-        self.value = 0.0
+        self.value = 0.0    # pulso de centro, no "sin pulsos"
+
+    def release(self):
+        self.pca_.set_duty(self.channel_, 0.0)
 
 
 class PCAServo:
@@ -180,12 +203,19 @@ class MotorCommand(Node):
         # Los derechos van espejados respecto a los izquierdos, por eso
         # arrancan invertidos. ¡Verificar con las ruedas en el aire!
         self.declare_parameter("servo_invert", [True, True, False, False])
-        # Corrección del punto muerto de cada servo (us), por si alguno se
-        # arrastra a velocidad baja
+        # Calibración (se puede cambiar en caliente con `ros2 param set`):
+        # servo_trim_us: corrección del punto muerto de cada servo (us). Subir
+        #   o bajar hasta que la rueda quede quieta con el comando en 0.
+        # servo_gain: escala de velocidad de cada servo (1.0 = span completo).
+        #   Bajar la del servo más rápido hasta que todos giren igual.
+        # servo_span_us: distancia al centro (us) a la que el servo llega a su
+        #   velocidad máxima. Muchos servos saturan antes de 500 us: si con
+        #   medio gatillo ya van a tope, bajarlo (p. ej. 200-300).
         self.declare_parameter("servo_trim_us", [0, 0, 0, 0])
+        self.declare_parameter("servo_gain", [1.0, 1.0, 1.0, 1.0])
         self.declare_parameter("servo_center_us", 1500)
-        self.declare_parameter("servo_span_us", 500)   # 1000..2000 us a tope
-        self.declare_parameter("servo_deadband", 0.02) # |cmd| menor: sin pulsos
+        self.declare_parameter("servo_span_us", 500)
+        self.declare_parameter("servo_deadband", 0.02) # |cmd| menor: pulso de centro
         self.declare_parameter("cam_channel", 9)
         self.declare_parameter("cam_min_deg", 20)     # ¡ajustar al montaje real!
         self.declare_parameter("cam_max_deg", 160)
@@ -263,24 +293,15 @@ class MotorCommand(Node):
                                  lambda m: self.shovel_.goto(m.data), 10)
         self.timer_ = self.create_timer(0.02, self.main_loop)  # 50 Hz
 
-        invert = list(self.get_parameter("servo_invert").value)
-        trim = list(self.get_parameter("servo_trim_us").value)
-        n = len(SERVO_MOTORS)
-        if len(invert) != n or len(trim) != n:
-            raise ValueError(
-                f"servo_invert y servo_trim_us necesitan {n} valores "
-                f"(orden {SERVO_MOTORS}); llegaron {len(invert)} y {len(trim)}")
-        center = self.get_parameter("servo_center_us").value
-        span = self.get_parameter("servo_span_us").value
-        deadband = float(self.get_parameter("servo_deadband").value)
-
+        cfg = self.servo_config({
+            name: self.get_parameter(name).value for name in SERVO_PARAMS})
+        if isinstance(cfg, str):
+            raise ValueError(cfg)
         self.motors_ = {
-            name: PCAContinuousServo(
-                self.pca_, SERVO_MOTOR_CHANNELS[name],
-                center_us=center + trim[i], span_us=span,
-                invert=bool(invert[i]), deadband=deadband)
-            for i, name in enumerate(SERVO_MOTORS)
+            name: PCAContinuousServo(self.pca_, SERVO_MOTOR_CHANNELS[name], **cfg[name])
+            for name in SERVO_MOTORS
         }
+        self.add_on_set_parameters_callback(self.on_servo_params)
         self.motors_.update({
             name: PCAMotor(self.pca_, fwd, bwd)
             for name, (fwd, bwd) in HBRIDGE_MOTOR_CHANNELS.items()
@@ -289,11 +310,7 @@ class MotorCommand(Node):
         self.get_logger().info(
             "Nodo motor_command iniciado (4 servos de rueda + 2 motores DC "
             "en puente H, vía PCA9685).")
-        self.get_logger().info(
-            "Servos de rueda: " + ", ".join(
-                f"{name}=canal {SERVO_MOTOR_CHANNELS[name]}"
-                f"{' (invertido)' if invert[i] else ''}"
-                for i, name in enumerate(SERVO_MOTORS)))
+        self.log_servo_config(cfg)
         self.get_logger().info(
             "Suscrito a /motor_cmd, /armed, /camera_tilt_delta, /camera_tilt_angle, "
             "/servo_delta, /servo_angle")
@@ -305,6 +322,56 @@ class MotorCommand(Node):
             f"{self.get_parameter('shovel_channel').value}, {self.shovel_.angle}°")
         self.get_logger().info(f"Lado izquierdo: {LEFT_MOTORS}")
         self.get_logger().info(f"Lado derecho:   {RIGHT_MOTORS}")
+
+    # ---------------- calibración de los servos de rueda ----------------
+    def servo_config(self, values):
+        """Parámetros servo_* -> kwargs de PCAContinuousServo por rueda,
+        o un str con el error si algo no cuadra."""
+        n = len(SERVO_MOTORS)
+        lists = {}
+        for key in ("servo_invert", "servo_trim_us", "servo_gain"):
+            lists[key] = list(values[key])
+            if len(lists[key]) != n:
+                return (f"{key} necesita {n} valores (orden {SERVO_MOTORS}); "
+                        f"llegaron {len(lists[key])}")
+        if any(not 0.0 <= g <= 1.5 for g in lists["servo_gain"]):
+            return "servo_gain fuera de rango (0.0 .. 1.5)"
+        center = float(values["servo_center_us"])
+        span = float(values["servo_span_us"])
+        if not (1000 <= center <= 2000 and 0 < span <= 1000):
+            return "servo_center_us debe ir en 1000..2000 y servo_span_us en 1..1000"
+        return {
+            name: dict(center_us=center + lists["servo_trim_us"][i],
+                       span_us=span,
+                       invert=bool(lists["servo_invert"][i]),
+                       gain=lists["servo_gain"][i],
+                       deadband=float(values["servo_deadband"]))
+            for i, name in enumerate(SERVO_MOTORS)
+        }
+
+    def on_servo_params(self, params):
+        changed = {p.name: p.value for p in params if p.name in SERVO_PARAMS}
+        if not changed:
+            return SetParametersResult(successful=True)
+        values = {name: self.get_parameter(name).value for name in SERVO_PARAMS}
+        values.update(changed)
+        try:
+            cfg = self.servo_config(values)
+        except (TypeError, ValueError) as e:
+            cfg = f"valor inválido: {e}"
+        if isinstance(cfg, str):
+            return SetParametersResult(successful=False, reason=cfg)
+        for name in SERVO_MOTORS:
+            self.motors_[name].configure(**cfg[name])
+        self.log_servo_config(cfg)
+        return SetParametersResult(successful=True)
+
+    def log_servo_config(self, cfg):
+        self.get_logger().info("Servos de rueda: " + ", ".join(
+            f"{name}=canal {SERVO_MOTOR_CHANNELS[name]} "
+            f"centro {c['center_us']:.0f} us x{c['gain']:.2f}"
+            f"{' inv' if c['invert'] else ''}"
+            for name, c in cfg.items()))
 
     def cmd_callback(self, msg: Twist):
         self.latest_cmd_ = msg
@@ -368,6 +435,9 @@ class MotorCommand(Node):
     def destroy_node(self):
         for motor in self.motors_.values():
             motor.stop()
+        # Deja salir unos pulsos de centro antes de apagar el PCA: un servo que
+        # retiene el último pulso se quedaría girando con el anterior.
+        time.sleep(0.1)
         self.cam_.release()
         self.shovel_.release()
         self.pca_.close()

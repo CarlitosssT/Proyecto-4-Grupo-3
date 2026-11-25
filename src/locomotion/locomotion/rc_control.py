@@ -33,6 +33,12 @@ BTN_CREATE = 8   # desarmar
 BTN_OPTIONS = 9  # armar
 BTN_R3 = 12    # clic del joystick derecho: centra la cámara
 
+# Escala de /motor_cmd. motor_command satura cada lado a ±1, así que con
+# SPEED_MAX = 1 la velocidad es proporcional a todo el recorrido del gatillo
+# (antes era 5: con ~20 % de gatillo las ruedas ya iban a tope).
+SPEED_MAX = 1.0             # linear.x con el gatillo a fondo
+STEER_MAX = 1.0             # angular.z con el joystick a fondo (motor_command lo multiplica por 0.7)
+
 # Arming switch
 JOY_TIMEOUT_S = 0.5         # sin /joy por más de esto -> se desarma solo
                             # (joy_node repite el último estado a 20 Hz: autorepeat_rate)
@@ -166,9 +172,10 @@ class RCControlNode(Node):
             self.last_tool_cmd_ = 0.0
             return
 
-        speed = self.linear_remap(joy.axes[AX_RT], a=1, b=-1, c=0, d=5)
-        speed -= self.linear_remap(joy.axes[AX_LT], a=1, b=-1, c=0, d=5)
-        angle = self.linear_remap(joy.axes[AX_STEER], a=-1, b=1, c=-3, d=3)
+        # Gatillo: +1 en reposo, -1 a fondo
+        speed = self.linear_remap(joy.axes[AX_RT], a=1, b=-1, c=0, d=SPEED_MAX)
+        speed -= self.linear_remap(joy.axes[AX_LT], a=1, b=-1, c=0, d=SPEED_MAX)
+        angle = self.linear_remap(joy.axes[AX_STEER], a=-1, b=1, c=-STEER_MAX, d=STEER_MAX)
 
         msg = Twist()
         msg.linear.x = speed
