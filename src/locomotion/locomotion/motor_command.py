@@ -10,30 +10,35 @@ from locomotion.pca9685 import PCA9685
 
 
 # =========================
-# Canales del PCA9685 — 3 puentes H TB6612FNG (2 motores por puente)
+# Canales del PCA9685
+# Delanteros y medios: servos de rotación continua (de velocidad), un canal
+# por servo con la señal de pulsos (1500 us = quieto).
+#   Canal 0: front_right   Canal 1: mid_right
+#   Canal 2: front_left    Canal 3: mid_left
+# Traseros: motorreductores DC en un puente H TB6612FNG.
 # PWMA y PWMB van fijos a VCC (3.3 V): el PWM se aplica sobre AIN1/AIN2 y
 # BIN1/BIN2 (IN1=PWM, IN2=L -> avance/libre; IN1=L, IN2=PWM -> reversa/libre).
-# Cada motor usa (IN_forward, IN_backward). Por puente: A = motor izquierdo,
-# B = motor derecho.
-#   Puente H 1 (front): AIN1, AIN2, BIN1, BIN2 = canales 0, 1, 2, 3
-#   Puente H 2 (mid):   AIN1, AIN2, BIN1, BIN2 = canales 4, 5, 6, 7
-#   Puente H 3 (rear):  AIN1, AIN2, BIN1, BIN2 = canales 8, 9, 10, 11
-# STBY de los 3 puentes va fijo a 5 V (siempre habilitados).
-# Canal 12: servo de inclinación de la cámara (parámetro cam_channel).
-# Canal 13: servo de la pala de excavación (parámetro shovel_channel).
-# Canales 14..15 libres.
-# Si un motor gira al revés, intercambia sus dos canales aquí (o sus cables).
-# ¡AJUSTAR según el cableado real de cada puente H antes de energizar!
+#   Pines 1-4 del puente (AIN1, AIN2, BIN1, BIN2) = canales 4, 5, 6, 7
+#   A = rear_left, B = rear_right. STBY fijo a 5 V (siempre habilitado).
+# Canal 8: servo de la pala de excavación (parámetro shovel_channel).
+# Canal 9: servo de inclinación de la cámara (parámetro cam_channel).
+# Canales 10..15 libres.
+# Si un servo de rueda gira al revés: parámetro servo_invert.
+# Si un motor trasero gira al revés: intercambia sus dos canales aquí (o sus cables).
+# ¡AJUSTAR según el cableado real antes de energizar!
 # =========================
-MOTOR_CHANNELS = {
-    # lado izquierdo (AIN1, AIN2)
-    "front_left": (0, 1),    # puente H 1
-    "mid_left":   (4, 5),    # puente H 2
-    "rear_left":  (8, 9),    # puente H 3
-    # lado derecho (BIN1, BIN2)
-    "front_right": (2, 3),   # puente H 1
-    "mid_right":   (6, 7),   # puente H 2
-    "rear_right":  (10, 11), # puente H 3
+SERVO_MOTOR_CHANNELS = {
+    "front_right": 0,
+    "mid_right":   1,
+    "front_left":  2,
+    "mid_left":    3,
+}
+# Mismo orden que SERVO_MOTOR_CHANNELS para los parámetros servo_invert/servo_trim_us
+SERVO_MOTORS = tuple(SERVO_MOTOR_CHANNELS)
+
+HBRIDGE_MOTOR_CHANNELS = {
+    "rear_left":  (4, 5),    # AIN1, AIN2 (pines 1, 2 del puente)
+    "rear_right": (6, 7),    # BIN1, BIN2 (pines 3, 4 del puente)
 }
 
 LEFT_MOTORS = ("front_left", "mid_left", "rear_left")
@@ -61,6 +66,41 @@ class PCAMotor:
             return  # evita tráfico I2C innecesario
         self.pca_.set_duty(self.forward_, max(value, 0.0))
         self.pca_.set_duty(self.backward_, max(-value, 0.0))
+        self.value_ = value
+
+    def stop(self):
+        self.value = 0.0
+
+
+class PCAContinuousServo:
+    """Servo de rotación continua (de velocidad) en un canal del PCA9685.
+    value en [-1, 1]: center_us + value * span_us. Con value ~0 no manda
+    pulsos (el servo queda quieto aunque su centro no esté bien calibrado)."""
+
+    def __init__(self, pca, channel, center_us=1500, span_us=500,
+                 invert=False, deadband=0.02):
+        self.pca_ = pca
+        self.channel_ = channel
+        self.center_ = center_us
+        self.span_ = span_us
+        self.sign_ = -1.0 if invert else 1.0
+        self.deadband_ = deadband
+        self.value_ = None  # fuerza la primera escritura
+
+    @property
+    def value(self):
+        return self.value_ or 0.0
+
+    @value.setter
+    def value(self, value):
+        value = max(-1.0, min(1.0, value))
+        if value == self.value_:
+            return  # evita tráfico I2C innecesario
+        if abs(value) < self.deadband_:
+            self.pca_.set_duty(self.channel_, 0.0)
+        else:
+            self.pca_.set_pulse_us(
+                self.channel_, self.center_ + self.sign_ * value * self.span_)
         self.value_ = value
 
     def stop(self):
@@ -129,20 +169,31 @@ class MotorCommand(Node):
 
         self.declare_parameter("i2c_bus", 1)
         self.declare_parameter("i2c_address", 0x40)
-        # 50 Hz porque el servo de la cámara comparte el PCA con los motores
-        # (antes eran 1000 Hz; los TB6612 funcionan igual, quizá zumben un poco).
+        # 50 Hz porque los servos (ruedas, cámara y pala) comparten el PCA con
+        # el puente H (los TB6612 funcionan igual, quizá zumben un poco).
         self.declare_parameter("pwm_frequency", 50)
         # Seguridad: sin /armed=True (rc_control) o sin /motor_cmd reciente, frena
         self.declare_parameter("require_arm", True)
         self.declare_parameter("cmd_timeout", 0.5)    # s; <= 0 lo desactiva
-        self.declare_parameter("cam_channel", 12)
+        # Servos de rueda (front/mid), en el orden de SERVO_MOTORS:
+        # front_right, mid_right, front_left, mid_left.
+        # Los derechos van espejados respecto a los izquierdos, por eso
+        # arrancan invertidos. ¡Verificar con las ruedas en el aire!
+        self.declare_parameter("servo_invert", [True, True, False, False])
+        # Corrección del punto muerto de cada servo (us), por si alguno se
+        # arrastra a velocidad baja
+        self.declare_parameter("servo_trim_us", [0, 0, 0, 0])
+        self.declare_parameter("servo_center_us", 1500)
+        self.declare_parameter("servo_span_us", 500)   # 1000..2000 us a tope
+        self.declare_parameter("servo_deadband", 0.02) # |cmd| menor: sin pulsos
+        self.declare_parameter("cam_channel", 9)
         self.declare_parameter("cam_min_deg", 20)     # ¡ajustar al montaje real!
         self.declare_parameter("cam_max_deg", 160)
         self.declare_parameter("cam_start_deg", 90)
         self.declare_parameter("cam_pulse_min_us", 500)
         self.declare_parameter("cam_pulse_max_us", 2400)
         # Servo de la pala (antes en la ESP32): mismos límites, arranque y pulsos
-        self.declare_parameter("shovel_channel", 13)
+        self.declare_parameter("shovel_channel", 8)
         self.declare_parameter("shovel_min_deg", 0)
         self.declare_parameter("shovel_max_deg", 180)
         self.declare_parameter("shovel_start_deg", 30)
@@ -176,7 +227,8 @@ class MotorCommand(Node):
         if self.pca_.frequency > 100:
             self.get_logger().warn(
                 f"pwm_frequency={self.pca_.frequency:.0f} Hz: un servo estándar "
-                "necesita ~50 Hz, la cámara y la pala no se van a mover bien.")
+                "necesita ~50 Hz, las ruedas delanteras/medias, la cámara y la "
+                "pala no se van a mover bien.")
         self.cam_ = PCAServo(
             self.pca_,
             channel=self.get_parameter("cam_channel").value,
@@ -211,12 +263,37 @@ class MotorCommand(Node):
                                  lambda m: self.shovel_.goto(m.data), 10)
         self.timer_ = self.create_timer(0.02, self.main_loop)  # 50 Hz
 
-        self.motors_ = {
-            name: PCAMotor(self.pca_, fwd, bwd)
-            for name, (fwd, bwd) in MOTOR_CHANNELS.items()
-        }
+        invert = list(self.get_parameter("servo_invert").value)
+        trim = list(self.get_parameter("servo_trim_us").value)
+        n = len(SERVO_MOTORS)
+        if len(invert) != n or len(trim) != n:
+            raise ValueError(
+                f"servo_invert y servo_trim_us necesitan {n} valores "
+                f"(orden {SERVO_MOTORS}); llegaron {len(invert)} y {len(trim)}")
+        center = self.get_parameter("servo_center_us").value
+        span = self.get_parameter("servo_span_us").value
+        deadband = float(self.get_parameter("servo_deadband").value)
 
-        self.get_logger().info("Nodo motor_command iniciado (6 motores / 3 puentes H vía PCA9685).")
+        self.motors_ = {
+            name: PCAContinuousServo(
+                self.pca_, SERVO_MOTOR_CHANNELS[name],
+                center_us=center + trim[i], span_us=span,
+                invert=bool(invert[i]), deadband=deadband)
+            for i, name in enumerate(SERVO_MOTORS)
+        }
+        self.motors_.update({
+            name: PCAMotor(self.pca_, fwd, bwd)
+            for name, (fwd, bwd) in HBRIDGE_MOTOR_CHANNELS.items()
+        })
+
+        self.get_logger().info(
+            "Nodo motor_command iniciado (4 servos de rueda + 2 motores DC "
+            "en puente H, vía PCA9685).")
+        self.get_logger().info(
+            "Servos de rueda: " + ", ".join(
+                f"{name}=canal {SERVO_MOTOR_CHANNELS[name]}"
+                f"{' (invertido)' if invert[i] else ''}"
+                for i, name in enumerate(SERVO_MOTORS)))
         self.get_logger().info(
             "Suscrito a /motor_cmd, /armed, /camera_tilt_delta, /camera_tilt_angle, "
             "/servo_delta, /servo_angle")

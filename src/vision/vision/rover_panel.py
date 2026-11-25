@@ -27,7 +27,6 @@ si no termina en 5 s, SIGKILL. El estado se lee de esos .pid cada 3 s, por lo
 que el panel refleja la realidad aunque un nodo haya muerto solo.
 """
 import glob
-import math
 import os
 import shlex
 import signal
@@ -41,7 +40,7 @@ try:
 except ImportError:  # corrido como script suelto
     from rover_beacon import find_rover
 
-# Video y ruedas dentro del panel: necesitan ROS 2 + OpenCV. Sin ellos el panel
+# Video dentro del panel: necesitan ROS 2 + OpenCV. Sin ellos el panel
 # sigue funcionando (solo pierde el video embebido).
 try:
     import time
@@ -52,7 +51,7 @@ try:
     from rclpy.executors import SingleThreadedExecutor
     from rclpy.qos import (QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy,
                            QoSDurabilityPolicy)
-    from sensor_msgs.msg import CompressedImage, JointState, Joy
+    from sensor_msgs.msg import CompressedImage, Joy
     from std_msgs.msg import Bool, String
     import numpy as np
     try:
@@ -69,7 +68,6 @@ REMOTE_USER = "ubuntu"
 REMOTE_WS = "~/proyecto-4-grupo-3"
 ROS_DOMAIN_ID = "42"
 POLL_S = 3.0
-WHEEL_MAX_RAD_S = 15.0   # fondo de escala de la barra de velocidad (±)
 # Logs de los nodos locales. Si el panel se abre con doble clic, su stdout es
 # un pipe sin lector y un nodo que escriba ahí muere por SIGPIPE (código 120).
 LOCAL_LOG_DIR = os.path.expanduser("~/.rover_panel")
@@ -103,16 +101,14 @@ REMOTE_NODES = {
                "ros2 launch vision rover.launch.py source:={source}"),
     "motores": ("Motores (motor_command)",
                 "ros2 run locomotion motor_command"),
-    "herramienta": ("Stepper + encoders (tool_command)",
+    "herramienta": ("Stepper (tool_command)",
                     "ros2 run locomotion tool_command"),
-    "encoders": ("Velocidad de ruedas (encoder_node)",
-                 "ros2 run locomotion encoder_node"),
 }
 
 # nombre -> (título, comando local). El mando DualSense se lee en el PC y
 # rc_control publica /motor_cmd hacia la Pi por la red (ROS_STATIC_PEERS).
 LOCAL_NODES = {
-    "visor": ("Video + ruedas (en el panel)", None),   # embebido, sin proceso
+    "visor": ("Video (en el panel)", None),   # embebido, sin proceso
     "joy": ("Mando: joy_node", ["ros2", "run", "joy", "joy_node"]),
     "rc": ("Mando: rc_control", ["ros2", "run", "locomotion", "rc_control"]),
 }
@@ -174,17 +170,9 @@ done; true
 """
 
 
-WHEEL_ORDER = ("front_left", "mid_left", "rear_left",
-               "front_right", "mid_right", "rear_right")
-WHEEL_TITLES = {"front_left": "Izq. delantera", "mid_left": "Izq. media",
-                "rear_left": "Izq. trasera", "front_right": "Der. delantera",
-                "mid_right": "Der. media", "rear_right": "Der. trasera"}
-WHEEL_STALE_S = 1.0     # sin /wheel_states por más de esto = dato viejo
-
-
 if HAVE_FEED:
     class RosFeed:
-        """Nodo ROS dentro del panel: video, estado del enlace y /wheel_states.
+        """Nodo ROS dentro del panel: video, estado del enlace, /joy y /armed.
 
         Corre en su propio hilo; Tk solo lee los atributos (asignaciones
         simples, seguras con el GIL).
@@ -201,8 +189,6 @@ if HAVE_FEED:
             self.frame = None
             self.last_rx = None
             self.link_rx = None
-            self.wheels = {}            # nombre -> (posición rad, velocidad rad/s)
-            self.wheels_rx = None
             self.joy_rx = None
             self.joy_axes = self.joy_nbtn = 0
             self.joy_pressed = []
@@ -216,7 +202,6 @@ if HAVE_FEED:
                              history=QoSHistoryPolicy.KEEP_LAST, depth=1)
             self.node.create_subscription(CompressedImage, topic, self._on_image, qos)
             self.node.create_subscription(String, self.link_topic, self._on_link, 1)
-            self.node.create_subscription(JointState, "/wheel_states", self._on_wheels, 10)
             self.node.create_subscription(Joy, "/joy", self._on_joy, 10)
             latched = QoSProfile(reliability=QoSReliabilityPolicy.RELIABLE,
                                  durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
@@ -247,12 +232,6 @@ if HAVE_FEED:
             except Exception:
                 pass
 
-        def _on_wheels(self, msg):
-            n = min(len(msg.name), len(msg.position), len(msg.velocity))
-            self.wheels = {msg.name[i]: (msg.position[i], msg.velocity[i])
-                           for i in range(n)}
-            self.wheels_rx = time.monotonic()
-
         def _on_joy(self, msg):
             self.joy_rx = time.monotonic()
             self.joy_axes, self.joy_nbtn = len(msg.axes), len(msg.buttons)
@@ -263,9 +242,6 @@ if HAVE_FEED:
 
         def joy_age(self):
             return None if self.joy_rx is None else time.monotonic() - self.joy_rx
-
-        def wheels_age(self):
-            return None if self.wheels_rx is None else time.monotonic() - self.wheels_rx
 
         def image(self, w, h, hud):
             """Cuadro listo para mostrar (BGR, w x h) con el HUD de estado."""
@@ -400,10 +376,10 @@ class Panel(tk.Tk):
         self.out = tk.Text(left, height=8, width=46, state="disabled", wrap="word")
         self.out.pack(fill="both", expand=True, padx=8, pady=8)
 
-    # ---- video y ruedas dentro del panel ----------------------------------
+    # ---- video dentro del panel ----------------------------------
     def _build_view(self, parent):
         self.video = tk.Label(parent, bg="black", fg="#aaa", text=(
-            "Sin video. Inicia «Video + ruedas» en «En este PC»."
+            "Sin video. Inicia «Video» en «En este PC»."
             if HAVE_FEED else
             "Video no disponible: faltan ROS 2 / OpenCV.\n"
             "Abre el panel con ./lanzar_panel.sh"),
@@ -418,28 +394,6 @@ class Panel(tk.Tk):
         self.ctl = tk.Label(parent, text="Mando: —", anchor="w", fg="white",
                             bg="#888", font=("TkDefaultFont", 11, "bold"), padx=8, pady=3)
         self.ctl.pack(fill="x", pady=(6, 0))
-
-        wf = ttk.LabelFrame(parent, text="Ruedas (/wheel_states)", padding=6)
-        wf.pack(fill="x", pady=(6, 0))
-        for c, t in enumerate(("Rueda", "Ángulo (°)", "Vueltas", "Vel. (rad/s)", "")):
-            ttk.Label(wf, text=t, font=("TkDefaultFont", 9, "bold")).grid(
-                row=0, column=c, sticky="w", padx=6)
-        self.wlab = {}
-        for r, name in enumerate(WHEEL_ORDER, start=1):
-            ttk.Label(wf, text=WHEEL_TITLES[name]).grid(row=r, column=0, sticky="w", padx=6)
-            labs = []
-            for c in (1, 2, 3):
-                lb = ttk.Label(wf, text="—", width=10, anchor="e",
-                               font=("TkFixedFont", 10))
-                lb.grid(row=r, column=c, padx=6)
-                labs.append(lb)
-            bar = ttk.Progressbar(wf, length=120, maximum=2 * WHEEL_MAX_RAD_S, value=WHEEL_MAX_RAD_S)
-            bar.grid(row=r, column=4, padx=6, pady=1)
-            self.wlab[name] = (labs, bar)
-        wf.columnconfigure(4, weight=1)
-        self.wstatus = ttk.Label(wf, text="Sin datos: ¿corren tool_command y encoder_node "
-                                          "(con counts_per_rev)?", foreground="#888")
-        self.wstatus.grid(row=7, column=0, columnspan=5, sticky="w", padx=6, pady=(4, 0))
 
     def _feed_topic(self):
         return f"/{self.source.get().replace(':', '')}/image/compressed"
@@ -466,8 +420,7 @@ class Panel(tk.Tk):
             f.close()
         self.photo = None
         self.ctl.configure(text="Mando: —", bg="#888")
-        self.video.configure(image="", text="Sin video. Inicia «Video + ruedas» en «En este PC».")
-        self._show_wheels({}, None)
+        self.video.configure(image="", text="Sin video. Inicia «Video» en «En este PC».")
 
     def _draw(self):
         f = self.feed
@@ -482,7 +435,6 @@ class Panel(tk.Tk):
                 except Exception as e:
                     self.say(f"Error dibujando video: {e}")
                     self._stop_feed()
-            self._show_wheels(f.wheels, f.wheels_age())
             self._show_ctl(f)
         self.after(40, self._draw)
 
@@ -497,29 +449,6 @@ class Panel(tk.Tk):
                     f"botones pulsados: {btn}  (Options=9, Create=8)  |  {arm}")
             color = "#1b7f3b" if f.armed else "#e65100"
         self.ctl.configure(text=text, bg=color)
-
-    def _show_wheels(self, wheels, age):
-        fresh = bool(wheels) and age is not None and age < WHEEL_STALE_S
-        for name, (labs, bar) in self.wlab.items():
-            if not fresh or name not in wheels:
-                for lb in labs:
-                    lb.configure(text="—")
-                bar.configure(value=WHEEL_MAX_RAD_S)
-                continue
-            pos, vel = wheels[name]
-            turns = pos / (2 * math.pi)
-            labs[0].configure(text=f"{math.degrees(pos) % 360:6.1f}")
-            labs[1].configure(text=f"{turns:+.2f}")
-            labs[2].configure(text=f"{vel:+.2f}")
-            bar.configure(value=max(0.0, min(2 * WHEEL_MAX_RAD_S, vel + WHEEL_MAX_RAD_S)))
-        if fresh:
-            self.wstatus.configure(text="Recibiendo datos de ruedas.", foreground="#1b7f3b")
-        elif age is not None:
-            self.wstatus.configure(text=f"Datos de ruedas viejos ({age:.0f} s).",
-                                   foreground="#b00020")
-        else:
-            self.wstatus.configure(text="Sin datos: ¿corren tool_command y encoder_node "
-                                        "(con counts_per_rev)?", foreground="#888")
 
     def _packages(self):
         src = os.path.join(LOCAL_WS, "src")

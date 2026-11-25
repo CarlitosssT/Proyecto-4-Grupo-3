@@ -3,7 +3,7 @@
 <package format="3">
   <name>locomotion</name>
   <version>0.0.0</version>
-  <description>Control de locomoción: 6 motores DC (3 puentes H) vía DualSense o teclado.</description>
+  <description>Control de locomoción: 4 servos de velocidad + 2 motores DC vía PCA9685, con DualSense o teclado, y herramienta.</description>
   <maintainer email="andrescarlos011@gmail.com">robotica</maintainer>
   <license>TODO: License declaration</license>
 
