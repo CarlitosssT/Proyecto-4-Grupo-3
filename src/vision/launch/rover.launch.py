@@ -41,8 +41,9 @@ ARGS = [
     ("af_mode", "manual", "manual | continuous | '' (no tocar)"),
     ("sensor_mode", "2304:1296", "Modo del sensor; vacío = automático"),
     ("shutter_us", "0", "0 = automático; 4000-8000 si hay desenfoque por movimiento"),
-    ("hflip", "false", "Voltear horizontal"),
-    ("vflip", "false", "Voltear vertical (si la cámara va montada al revés)"),
+    # hflip + vflip = rotación de 180° (la cámara va montada al revés)
+    ("hflip", "true", "Voltear horizontal"),
+    ("vflip", "true", "Voltear vertical"),
     ("tuning", "", "Ruta a imx708_wide.json si rpicam no detecta la versión Wide"),
     ("wifi_iface", "auto", "Interfaz Wi-Fi a reportar; auto = la que lleva el tráfico"),
     ("probe", "false", "true para medir latencia (requiere echo:=true en la base)"),

@@ -89,8 +89,8 @@ class CameraNode(Node):
         self.declare_parameter("af_mode", "manual")
         self.declare_parameter("lens_position", 0.0)
         self.declare_parameter("shutter_us", 0)
-        self.declare_parameter("hflip", False)
-        self.declare_parameter("vflip", False)
+        self.declare_parameter("hflip", True)    # hflip + vflip = rotación 180°
+        self.declare_parameter("vflip", True)
         self.declare_parameter("tuning_file", "")
 
         # --- Publicación ---

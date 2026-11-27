@@ -58,7 +58,7 @@ SERVO_REPEAT_S = 0.03       # ~33 °/s (la prueba del Arduino iba a ~66 °/s)
 # empuja el stick, más rápido se mueve; al soltarlo la cámara se queda donde está.
 CAM_DEADZONE = 0.15         # ignora el ruido del stick en reposo
 CAM_MAX_DEG_S = 15.0        # velocidad con el stick a fondo
-CAM_INVERT = False          # True si "stick arriba" baja la cámara (según montaje)
+CAM_INVERT = True           # True si "stick arriba" baja la cámara (según montaje)
 CAM_CENTER_DEG = 90         # ángulo al que va con R3 (motor_command lo limita a cam_min/cam_max)
 
 
