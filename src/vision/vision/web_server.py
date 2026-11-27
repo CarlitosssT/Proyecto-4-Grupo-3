@@ -197,6 +197,7 @@ PAGE = r"""<!doctype html>
   <button onclick="toggleHud()">H datos</button>
   <button onclick="guides=!guides;draw()">G guias</button>
   <button onclick="snap()">S foto</button>
+  <button onclick="toggleFlip()">V voltear</button>
   <span class="grow"></span>
   <span id="msg" style="color:var(--mute)"></span>
 </div>
@@ -205,6 +206,10 @@ const c = document.getElementById('c'), ctx = c.getContext('2d');
 let bmp = null, blob = null, seq = -1, lastRx = 0, guides = false;
 let arrivals = [], bytes = [], expected = 30, link = null, linkAt = 0;
 const SIG_WARN = -72, STALE_MS = 500;
+// Espejo horizontal del video (solo en la página; no cambia lo que manda la cámara).
+// Se recuerda por navegador; por defecto activado.
+let flip = true;
+try { flip = localStorage.getItem('flip') !== '0'; } catch (e) {}
 
 function resize() {
   const r = window.devicePixelRatio || 1;
@@ -217,7 +222,11 @@ function draw() {
   if (!bmp) return;
   const s = Math.min(c.width / bmp.width, c.height / bmp.height);
   const w = bmp.width * s, h = bmp.height * s, x = (c.width - w) / 2, y = (c.height - h) / 2;
-  ctx.drawImage(bmp, x, y, w, h);
+  if (flip) {
+    // La imagen está centrada, así que reflejar el lienzo entero la deja en el mismo sitio
+    ctx.save(); ctx.translate(c.width, 0); ctx.scale(-1, 1);
+    ctx.drawImage(bmp, x, y, w, h); ctx.restore();
+  } else ctx.drawImage(bmp, x, y, w, h);
   if (document.body.classList.contains('stale')) {
     ctx.fillStyle = 'rgba(0,0,0,.65)'; ctx.fillRect(x, y, w, h);
   }
@@ -329,6 +338,10 @@ function fs() {
   else (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
 }
 function toggleHud() { document.body.classList.toggle('nohud'); }
+function toggleFlip() {
+  flip = !flip; draw(); flash(flip ? 'imagen volteada' : 'imagen original');
+  try { localStorage.setItem('flip', flip ? '1' : '0'); } catch (e) {}
+}
 function flash(t) {
   const m = document.getElementById('msg'); m.textContent = t;
   clearTimeout(flash.t); flash.t = setTimeout(() => m.textContent = '', 2500);
@@ -344,6 +357,7 @@ addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   if (k === 'f') fs(); else if (k === 'h') toggleHud();
   else if (k === 'g') { guides = !guides; draw(); } else if (k === 's') snap();
+  else if (k === 'v') toggleFlip();
 });
 
 resize(); loop(); poll();
