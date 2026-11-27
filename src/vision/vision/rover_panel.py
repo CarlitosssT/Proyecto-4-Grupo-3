@@ -125,6 +125,11 @@ SSH_OPTS = [
 PROLOGUE = f"""
 export ROS_DOMAIN_ID={ROS_DOMAIN_ID}
 eval "$(grep -E '^export ROS_' ~/.bashrc 2>/dev/null)"
+# Se suma la IP de este PC (la que abrió el SSH) a los peers: la del ~/.bashrc
+# de la Pi queda vieja cada vez que el PC cambia de red y entonces la Pi no
+# encuentra al PC por su cuenta.
+PC_IP="${{SSH_CLIENT%% *}}"
+[ -n "$PC_IP" ] && export ROS_STATIC_PEERS="${{ROS_STATIC_PEERS:+$ROS_STATIC_PEERS;}}$PC_IP"
 for f in /opt/ros/*/setup.bash; do [ -f "$f" ] && . "$f"; done
 [ -f {REMOTE_WS}/install/setup.bash ] && . {REMOTE_WS}/install/setup.bash
 D=~/.rover_panel; mkdir -p "$D"
@@ -243,8 +248,11 @@ if HAVE_FEED:
         def joy_age(self):
             return None if self.joy_rx is None else time.monotonic() - self.joy_rx
 
-        def image(self, w, h, hud):
-            """Cuadro listo para mostrar (BGR, w x h) con el HUD de estado."""
+        def image(self, w, h, hud, flip_h=False, flip_v=False):
+            """Cuadro listo para mostrar (BGR, w x h) con el HUD de estado.
+
+            flip_h / flip_v voltean solo lo que se ve en el panel (no la cámara).
+            """
             now = time.monotonic_ns()
             st = self.state
             self.stats.prune(now)
@@ -259,7 +267,11 @@ if HAVE_FEED:
                 st.mbps, st.kb_per_frame = s["kbps"] / 1000.0, s["avg_kb"]
             else:
                 st.fps = st.loss_pct = st.mbps = st.kb_per_frame = None
-            return render(self.frame, st, w, h)
+            frame = self.frame
+            if frame is not None and (flip_h or flip_v):
+                # cv2.flip: 1 = horizontal, 0 = vertical, -1 = ambos (180°)
+                frame = cv2.flip(frame, -1 if flip_h and flip_v else (1 if flip_h else 0))
+            return render(frame, st, w, h)
 
         def close(self):
             try:
@@ -333,6 +345,9 @@ class Panel(tk.Tk):
         ttk.Label(s, text="Fuente de cámara:").pack(side="left")
         ttk.Combobox(s, textvariable=self.source, width=8,
                      values=["csi:0", "usb:0"]).pack(side="left", padx=4)
+        # El tópico del video depende de la fuente (/csi0 o /usb0): si se
+        # cambia con el video abierto, el panel se vuelve a suscribir.
+        self.source.trace_add("write", lambda *_: self.after(300, self._follow_source))
 
         loc = ttk.LabelFrame(left, text="En este PC", padding=8)
         loc.pack(fill="x", padx=8, pady=4)
@@ -390,6 +405,12 @@ class Panel(tk.Tk):
         self.hud = tk.BooleanVar(value=True)
         ttk.Checkbutton(opts, text="Datos sobre el video",
                         variable=self.hud).pack(side="left")
+        self.flip_h = tk.BooleanVar(value=False)
+        self.flip_v = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opts, text="Voltear \u2194",
+                        variable=self.flip_h).pack(side="left", padx=(16, 0))
+        ttk.Checkbutton(opts, text="Voltear \u2195",
+                        variable=self.flip_v).pack(side="left", padx=(8, 0))
 
         self.ctl = tk.Label(parent, text="Mando: —", anchor="w", fg="white",
                             bg="#888", font=("TkDefaultFont", 11, "bold"), padx=8, pady=3)
@@ -397,6 +418,11 @@ class Panel(tk.Tk):
 
     def _feed_topic(self):
         return f"/{self.source.get().replace(':', '')}/image/compressed"
+
+    def _follow_source(self):
+        if self.feed and self.feed.topic != self._feed_topic():
+            self._stop_feed()
+            self._start_feed()
 
     def _start_feed(self):
         if not HAVE_FEED:
@@ -428,7 +454,8 @@ class Panel(tk.Tk):
             w, h = self.video.winfo_width(), self.video.winfo_height()
             if w > 64 and h > 36:
                 try:
-                    ok, ppm = cv2.imencode(".ppm", f.image(w, h, self.hud.get()))
+                    ok, ppm = cv2.imencode(".ppm", f.image(w, h, self.hud.get(),
+                                                           self.flip_h.get(), self.flip_v.get()))
                     if ok:
                         self.photo = tk.PhotoImage(data=ppm.tobytes(), format="PPM")
                         self.video.configure(image=self.photo, text="")
